@@ -5,3 +5,8 @@
 /checkpoints/*.json
 /tasks/*.json
 .intake/
+
+# Refinery proposals and alternate-target build output are demonstrations,
+# regenerable on demand — not committed.
+/refinery/proposals/
+/dist/

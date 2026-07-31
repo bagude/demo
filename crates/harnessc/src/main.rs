@@ -1,21 +1,26 @@
-//! `harnessc` — compile a `harness.patterns.yaml` into a Claude Code Playbook.
+//! `harnessc` — compile a `harness.patterns.yaml` into a governed harness.
 //!
-//! - `harnessc check` parses and validates the spec, statically rejecting any
-//!   incomplete or unsafe composition.
+//! - `harnessc check` parses and validates the spec against the target
+//!   binding's capabilities, statically rejecting any incomplete or unsafe
+//!   composition.
 //! - `harnessc show`  prints the compiled model: patterns, `within` relations,
 //!   and bindings — the harness made inspectable *before* execution.
 //! - `harnessc build` does `check`, then writes the generated files, each
 //!   stamped with the spec hash.
+//!
+//! The target platform is taken from the spec's `platform.type`, or overridden
+//! with `--target`. The same spec can compile to more than one target.
 
-mod generate;
+mod backend;
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use spec::compile;
 
-use crate::generate::{generate, GENERATOR_VERSION};
+use crate::backend::Backend;
+use crate::common::GENERATOR_VERSION;
 
 #[derive(Parser)]
 #[command(name = "harnessc", version, about)]
@@ -30,19 +35,27 @@ enum Command {
     Check {
         #[arg(long, default_value = "harness.patterns.yaml")]
         spec: PathBuf,
+        /// Target binding (default: the spec's platform.type).
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Print the compiled model without generating anything.
     Show {
         #[arg(long, default_value = "harness.patterns.yaml")]
         spec: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
     },
-    /// Validate, then generate the Playbook.
+    /// Validate, then generate the harness.
     Build {
         #[arg(long, default_value = "harness.patterns.yaml")]
         spec: PathBuf,
-        /// Directory to write the Playbook into.
+        /// Directory to write the output into.
         #[arg(long, default_value = ".")]
         out: PathBuf,
+        /// Target binding (default: the spec's platform.type).
+        #[arg(long)]
+        target: Option<String>,
         /// Print the files that would be written without touching disk.
         #[arg(long)]
         dry_run: bool,
@@ -61,11 +74,16 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     match Cli::parse().command {
-        Command::Check { spec } => {
+        Command::Check { spec, target } => {
             let (text, _) = read_spec(&spec)?;
-            match compile(&text) {
+            let backend = resolve_backend(target.as_deref(), &text)?;
+            match spec::compile(&text, backend.as_binding()) {
                 Ok(compiled) => {
-                    println!("ok: '{}' compiles", compiled.spec.harness.name);
+                    println!(
+                        "ok: '{}' compiles for target '{}'",
+                        compiled.spec.harness.name,
+                        backend.platform()
+                    );
                     for w in &compiled.warnings {
                         println!("  {w}");
                     }
@@ -77,15 +95,22 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::Show { spec } => {
+        Command::Show { spec, target } => {
             let (text, _) = read_spec(&spec)?;
-            let compiled = compile(&text)?;
-            print_model(&compiled);
+            let backend = resolve_backend(target.as_deref(), &text)?;
+            let compiled = spec::compile(&text, backend.as_binding())?;
+            print_model(&compiled, backend.platform());
             Ok(ExitCode::SUCCESS)
         }
-        Command::Build { spec, out, dry_run } => {
+        Command::Build {
+            spec,
+            out,
+            target,
+            dry_run,
+        } => {
             let (text, hash) = read_spec(&spec)?;
-            let compiled = match compile(&text) {
+            let backend = resolve_backend(target.as_deref(), &text)?;
+            let compiled = match spec::compile(&text, backend.as_binding()) {
                 Ok(c) => c,
                 Err(e) => {
                     eprint!("{e}");
@@ -96,27 +121,47 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 eprintln!("{w}");
             }
 
-            let generated = generate(&compiled, &hash);
+            let generated = backend.generate(&compiled, &hash);
             println!(
-                "compiled '{}' (spec {}) with harnessc {GENERATOR_VERSION}",
-                compiled.spec.harness.name, hash
+                "compiled '{}' for '{}' (spec {}) with harnessc {GENERATOR_VERSION}",
+                compiled.spec.harness.name,
+                backend.platform(),
+                hash
             );
             for file in &generated.files {
-                let target = out.join(&file.path);
+                let target_path = out.join(&file.path);
                 if dry_run {
-                    println!("  would write {}", target.display());
+                    println!("  would write {}", target_path.display());
                     continue;
                 }
-                if let Some(parent) = target.parent() {
+                if let Some(parent) = target_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                std::fs::write(&target, &file.content)?;
-                make_executable_if_hook(&target)?;
-                println!("  wrote {}", target.display());
+                std::fs::write(&target_path, &file.content)?;
+                make_executable_if_hook(&target_path)?;
+                println!("  wrote {}", target_path.display());
             }
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Choose a back-end from an explicit `--target` or the spec's `platform.type`.
+fn resolve_backend(
+    target: Option<&str>,
+    text: &str,
+) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+    let name = match target {
+        Some(t) => t.to_string(),
+        None => spec::platform_of(text).map_err(|e| e.to_string())?,
+    };
+    backend::select(&name).ok_or_else(|| {
+        format!(
+            "unknown target '{name}'; available: {}",
+            backend::available().join(", ")
+        )
+        .into()
+    })
 }
 
 /// Read the spec text and compute its content hash (the identity stamped into
@@ -147,10 +192,10 @@ fn make_executable_if_hook(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn print_model(compiled: &spec::CompiledSpec) {
+fn print_model(compiled: &spec::CompiledSpec, target: &str) {
     let s = &compiled.spec;
     println!("harness: {} v{}", s.harness.name, s.harness.version);
-    println!("platform: {}", s.platform.kind);
+    println!("target: {target}");
     println!("composition: {}", s.composition.expression);
 
     let mut patterns: Vec<String> = compiled
@@ -179,7 +224,12 @@ fn print_model(compiled: &spec::CompiledSpec) {
         println!("  law: {} ({:?}@{:?})", law.id, law.kind, law.event);
     }
     if let Some(g) = &s.bindings.gate {
-        println!("  gate: {} @ {}", g.id, g.boundary);
+        let obl = if g.requires_obligations.is_empty() {
+            String::new()
+        } else {
+            format!(" requires[{}]", g.requires_obligations.join(", "))
+        };
+        println!("  gate: {} @ {}{}", g.id, g.boundary, obl);
     }
     if let Some(l) = &s.bindings.ledger {
         println!("  ledger: {}", l.destination);

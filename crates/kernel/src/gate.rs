@@ -54,6 +54,9 @@ pub struct Checkpoint {
     /// Where execution resumes once approved.
     pub continuation: String,
     pub created_at: String,
+    /// Obligation ids that must be discharged before this Gate will resume.
+    #[serde(default)]
+    pub requires_obligations: Vec<String>,
     /// Present once a decision has been recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalBinding>,
@@ -74,6 +77,8 @@ pub enum GateError {
     },
     /// The approval has expired.
     Expired { expiry: String, now: String },
+    /// A required obligation is still outstanding.
+    ObligationOutstanding { obligation: String },
 }
 
 impl std::fmt::Display for GateError {
@@ -96,6 +101,12 @@ impl std::fmt::Display for GateError {
             ),
             GateError::Expired { expiry, now } => {
                 write!(f, "approval expired at {expiry} (now {now})")
+            }
+            GateError::ObligationOutstanding { obligation } => {
+                write!(
+                    f,
+                    "obligation '{obligation}' is still outstanding; discharge it first"
+                )
             }
         }
     }
@@ -123,8 +134,29 @@ impl Checkpoint {
             preconditions,
             continuation: continuation.into(),
             created_at: created_at.into(),
+            requires_obligations: Vec::new(),
             approval: None,
         }
+    }
+
+    /// Declare obligations that must be discharged before this Gate resumes.
+    pub fn requiring_obligations(mut self, obligations: Vec<String>) -> Self {
+        self.requires_obligations = obligations;
+        self
+    }
+
+    /// Refuse to resume while any required obligation is still in `outstanding`.
+    /// The caller computes `outstanding` from the Ledger (see
+    /// [`crate::obligation::outstanding`]); the Gate stays the policy point.
+    pub fn check_obligations(&self, outstanding: &[String]) -> Result<(), GateError> {
+        for required in &self.requires_obligations {
+            if outstanding.iter().any(|o| o == required) {
+                return Err(GateError::ObligationOutstanding {
+                    obligation: required.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Record an approval against this checkpoint's current action and
@@ -316,6 +348,18 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, GateError::Expired { .. }));
+    }
+
+    #[test]
+    fn outstanding_obligation_blocks_the_gate() {
+        let cp = checkpoint().requiring_obligations(vec!["require-validation".into()]);
+        // Open obligation: refused.
+        let err = cp
+            .check_obligations(&["require-validation".to_string()])
+            .unwrap_err();
+        assert!(matches!(err, GateError::ObligationOutstanding { .. }));
+        // Discharged (nothing outstanding): allowed.
+        assert!(cp.check_obligations(&[]).is_ok());
     }
 
     #[test]

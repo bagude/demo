@@ -11,6 +11,7 @@
 //! intends: "When two patterns meet, ask what new obligation their meeting
 //! creates."
 
+use crate::binding::Binding;
 use crate::compose::Expr;
 use crate::model::{LawEvent, LawKind, PatternKind, SpecFile};
 
@@ -57,40 +58,21 @@ impl std::fmt::Display for Diagnostic {
     }
 }
 
-/// The claude-code binding only knows how to enforce a fixed set of Laws. A Law
-/// whose id is not here cannot be compiled honestly, so it is rejected rather
-/// than stubbed and pretended-enforced.
-fn claude_code_supports_law(id: &str) -> bool {
-    matches!(id, "enforce-file-scope" | "require-validation")
-}
-
 /// Tokens that describe *what* is approved rather than a material precondition
 /// whose drift should invalidate approval.
 const NON_PRECONDITION_BINDINGS: &[&str] = &["action_hash", "approver", "expiry"];
 
-/// Run every check against a parsed spec and its composition tree. Returns all
-/// diagnostics; the caller decides that any `Error` blocks compilation.
-pub fn check(spec: &SpecFile, expr: &Expr) -> Vec<Diagnostic> {
+/// Run every check against a parsed spec, its composition tree, and the target
+/// binding's capabilities. Returns all diagnostics; the caller treats any
+/// `Error` as blocking.
+pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnostic> {
     let mut d = Vec::new();
-    check_platform(spec, &mut d);
     check_cross_reference(spec, expr, &mut d);
     check_gate(spec, &mut d);
-    check_laws(spec, &mut d);
+    check_laws(spec, binding, &mut d);
     check_ledger(spec, &mut d);
-    check_composition(spec, expr, &mut d);
+    check_composition(spec, expr, binding, &mut d);
     d
-}
-
-fn check_platform(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
-    if spec.platform.kind != "claude-code" {
-        d.push(Diagnostic::error(
-            "platform.unsupported",
-            format!(
-                "this bootstrap compiler only has a 'claude-code' binding, got '{}'",
-                spec.platform.kind
-            ),
-        ));
-    }
 }
 
 fn check_cross_reference(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) {
@@ -165,7 +147,7 @@ fn check_gate(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_laws(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
+fn check_laws(spec: &SpecFile, binding: &dyn Binding, d: &mut Vec<Diagnostic>) {
     for law in &spec.bindings.laws {
         let consistent = matches!(
             (law.kind, law.event),
@@ -186,12 +168,13 @@ fn check_laws(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
                 format!("law '{}' must list at least one tool it applies to", law.id),
             ));
         }
-        if !claude_code_supports_law(&law.id) {
+        if !binding.supports_law(&law.id) {
             d.push(Diagnostic::error(
                 "law.unsupported",
                 format!(
-                    "the claude-code binding cannot enforce law '{}'; generating a stub would \
+                    "the {} binding cannot enforce law '{}'; generating a stub would \
                      lie about the guarantee. Implement it in the kernel or remove it.",
+                    binding.platform(),
                     law.id
                 ),
             ));
@@ -229,8 +212,34 @@ fn check_ledger(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_composition(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) {
+fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mut Vec<Diagnostic>) {
     let b = &spec.bindings;
+
+    // Obligation Law + Gate ⇒ the obligation must be discharged *through* the
+    // Gate, not merely recorded. If the binding's kernel can discharge an
+    // obligation, the Gate must list it in requires_obligations; otherwise the
+    // "every edit is followed by the test suite" promise is never enforced.
+    if let Some(gate) = &b.gate {
+        for law in &b.laws {
+            let is_obligation = matches!(law.kind, LawKind::Obligation);
+            let dischargeable = binding
+                .dischargeable_obligations()
+                .contains(&law.id.as_str());
+            if is_obligation
+                && dischargeable
+                && !gate.requires_obligations.iter().any(|o| o == &law.id)
+            {
+                d.push(Diagnostic::error(
+                    "composition.obligation_not_discharged",
+                    format!(
+                        "obligation law '{}' is recorded but never discharged; gate '{}' must list \
+                         it in requires_obligations so progress halts until it is satisfied",
+                        law.id, gate.id
+                    ),
+                ));
+            }
+        }
+    }
 
     // Gate + Night Shift ⇒ durable suspension and precondition revalidation.
     if expr.contains(PatternKind::Gate) && expr.contains(PatternKind::NightShift) {
@@ -317,6 +326,7 @@ bindings:
     boundary: before_commit
     checkpoint_schema: schemas/checkpoint.schema.json
     bind: [action_hash, repository_revision, working_tree_hash, approver, expiry]
+    requires_obligations: [require-validation]
   ledger:
     event_schema: schemas/event.schema.json
     destination: evidence/events.jsonl
@@ -327,10 +337,25 @@ platform:
     boot_context: CLAUDE.md
 "#;
 
+    /// A stand-in for the claude-code binding's capabilities.
+    struct MockBinding;
+
+    impl Binding for MockBinding {
+        fn platform(&self) -> &str {
+            "claude-code"
+        }
+        fn supports_law(&self, law_id: &str) -> bool {
+            matches!(law_id, "enforce-file-scope" | "require-validation")
+        }
+        fn dischargeable_obligations(&self) -> &[&str] {
+            &["require-validation"]
+        }
+    }
+
     fn check_yaml(yaml: &str) -> Vec<Diagnostic> {
         let spec: SpecFile = serde_yaml::from_str(yaml).expect("parses");
         let expr = crate::compose::parse(&spec.composition.expression).expect("composition parses");
-        check(&spec, &expr)
+        check(&spec, &expr, &MockBinding)
     }
 
     fn codes(diags: &[Diagnostic]) -> Vec<&'static str> {
@@ -339,7 +364,15 @@ platform:
 
     #[test]
     fn specimen_compiles_cleanly() {
-        assert!(compile(SPECIMEN).is_ok());
+        assert!(compile(SPECIMEN, &MockBinding).is_ok());
+    }
+
+    #[test]
+    fn obligation_not_discharged_by_gate_is_rejected() {
+        // Drop the requires_obligations line: the obligation is now recorded
+        // but never discharged.
+        let yaml = SPECIMEN.replace("    requires_obligations: [require-validation]\n", "");
+        assert!(codes(&check_yaml(&yaml)).contains(&"composition.obligation_not_discharged"));
     }
 
     #[test]
@@ -390,7 +423,7 @@ platform:
             r#"expression: "Intake -> Verb within (Law + Gate) + Ledger""#,
             r#"expression: "Intake -> Verb within (Law + Gate) + Ledger + Sandbox""#,
         );
-        let err = compile(&yaml).unwrap_err();
+        let err = compile(&yaml, &MockBinding).unwrap_err();
         assert!(matches!(err, CompileError::Rejected(_)));
     }
 

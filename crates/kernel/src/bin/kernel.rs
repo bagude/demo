@@ -55,6 +55,29 @@ enum Command {
         #[arg(long, default_value = "require-validation")]
         obligation: String,
     },
+    /// Gate at the commit boundary: read a proposed Bash tool call on stdin and,
+    /// if it is a `git commit`, block it (exit 2) while any required obligation
+    /// is still outstanding. Non-commit commands pass through.
+    PreCommit {
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long = "require")]
+        require: Vec<String>,
+    },
+    /// Discharge an obligation: optionally run a check command, and on success
+    /// append a discharge event so a Gate that requires it can proceed.
+    Validate {
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long, default_value = "require-validation")]
+        obligation: String,
+        /// Shell command whose success is the evidence of discharge (e.g.
+        /// "cargo test"). If it fails, nothing is discharged.
+        #[arg(long)]
+        check: Option<String>,
+    },
     /// Gate operations: request a checkpoint, approve it, or verify it.
     #[command(subcommand)]
     Gate(GateCmd),
@@ -102,6 +125,9 @@ enum GateCmd {
         /// Precondition tokens as `key=value` (e.g. repository_revision=abc123).
         #[arg(long = "precondition")]
         preconditions: Vec<String>,
+        /// Obligation ids that must be discharged before this Gate resumes.
+        #[arg(long = "require-obligation")]
+        require_obligations: Vec<String>,
         #[arg(long, default_value = "checkpoints")]
         checkpoints: PathBuf,
     },
@@ -114,8 +140,9 @@ enum GateCmd {
         #[arg(long)]
         expiry: Option<String>,
     },
-    /// Revalidate a checkpoint's approval against the current world. Exits 0 if
-    /// the approval still holds, 1 if it has been invalidated.
+    /// Revalidate a checkpoint's approval against the current world, including
+    /// any required obligations. Exits 0 if the approval still holds, 1 if it
+    /// has been invalidated.
     Verify {
         #[arg(long)]
         checkpoint: PathBuf,
@@ -123,6 +150,10 @@ enum GateCmd {
         action_hash: String,
         #[arg(long = "precondition")]
         preconditions: Vec<String>,
+        /// Ledger to compute outstanding obligations from. Required if the
+        /// checkpoint declares any required obligations.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
     },
 }
 
@@ -186,6 +217,64 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 evidence_refs: vec![],
             };
             EventLog::at(&ledger).append(&event)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::PreCommit { ledger, require } => {
+            let mut stdin = String::new();
+            std::io::stdin().read_to_string(&mut stdin).ok();
+            // Only a git commit is gated here; everything else passes.
+            if !is_git_commit(&stdin) {
+                return Ok(ExitCode::SUCCESS);
+            }
+            let events = EventLog::at(&ledger).read_all().unwrap_or_default();
+            let outstanding = kernel::obligation::outstanding(&events, &require);
+            if outstanding.is_empty() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                eprintln!(
+                    "blocked by approve-commit gate: obligation(s) outstanding: {}. \
+                     Run the validation step to discharge before committing.",
+                    outstanding.join(", ")
+                );
+                Ok(ExitCode::from(2))
+            }
+        }
+        Command::Validate {
+            ledger,
+            run_id,
+            obligation,
+            check,
+        } => {
+            if let Some(cmd) = &check {
+                let status = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .status()?;
+                if !status.success() {
+                    eprintln!("validation check failed: `{cmd}`; obligation not discharged");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            let evidence_refs = check
+                .as_ref()
+                .map(|c| format!("check:{c}"))
+                .into_iter()
+                .collect();
+            let event = Event {
+                run_id,
+                task_id: None,
+                parent_task_id: None,
+                action_id: "validate".into(),
+                actor: "kernel".into(),
+                timestamp: now_rfc3339(),
+                transition: kernel::obligation::discharge_transition(&obligation),
+                input_refs: vec![],
+                output_refs: vec![],
+                decision: Decision::Recorded,
+                evidence_refs,
+            };
+            EventLog::at(&ledger).append(&event)?;
+            println!("discharged obligation '{obligation}'");
             Ok(ExitCode::SUCCESS)
         }
         Command::Gate(cmd) => gate(cmd),
@@ -278,6 +367,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             summary,
             continuation,
             preconditions,
+            require_obligations,
             checkpoints,
         } => {
             let action_hash = match (action_hash, action_file) {
@@ -293,7 +383,8 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 continuation,
                 parse_preconditions(&preconditions)?,
                 now_rfc3339(),
-            );
+            )
+            .requiring_obligations(require_obligations);
             let path = GateStore::at(&checkpoints).save(&checkpoint)?;
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
@@ -322,19 +413,35 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             checkpoint,
             action_hash,
             preconditions,
+            ledger,
         } => {
             let cp = GateStore::load(&checkpoint)?;
             let preconds = parse_preconditions(&preconditions)?;
-            match cp.revalidate(&action_hash, &preconds, &now_rfc3339()) {
-                Ok(_) => {
-                    println!("approval valid");
-                    Ok(ExitCode::SUCCESS)
-                }
-                Err(e) => {
-                    eprintln!("approval invalid: {e}");
-                    Ok(ExitCode::FAILURE)
+
+            if let Err(e) = cp.revalidate(&action_hash, &preconds, &now_rfc3339()) {
+                eprintln!("approval invalid: {e}");
+                return Ok(ExitCode::FAILURE);
+            }
+
+            // The Gate also refuses to resume while a required obligation is
+            // outstanding — this is how "recorded" becomes "enforced".
+            if !cp.requires_obligations.is_empty() {
+                let Some(ledger) = ledger else {
+                    return Err(
+                        "checkpoint requires obligations; pass --ledger to evaluate them".into(),
+                    );
+                };
+                let events = EventLog::at(&ledger).read_all()?;
+                let outstanding =
+                    kernel::obligation::outstanding(&events, &cp.requires_obligations);
+                if let Err(e) = cp.check_obligations(&outstanding) {
+                    eprintln!("gate refused: {e}");
+                    return Ok(ExitCode::FAILURE);
                 }
             }
+
+            println!("approval valid");
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
@@ -349,6 +456,22 @@ fn load_packet(path: &std::path::Path) -> Result<TaskPacket, Box<dyn std::error:
     } else {
         toml::from_str(&text)?
     })
+}
+
+/// True if the tool-call JSON on stdin is a Bash `git commit`. Heuristic: the
+/// command string contains both `git` and `commit` tokens. Documented as such;
+/// commit-alias schemes would need a richer matcher.
+fn is_git_commit(stdin: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdin) else {
+        return false;
+    };
+    let command = value
+        .pointer("/tool_input/command")
+        .or_else(|| value.pointer("/command"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    tokens.contains(&"git") && tokens.contains(&"commit")
 }
 
 /// Pull a file path out of a Claude Code tool-call JSON payload, checking the

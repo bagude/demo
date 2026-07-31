@@ -47,6 +47,10 @@ bindings:
       - working_tree_hash
       - approver
       - expiry
+    # The obligation recorded by require-validation must be discharged before
+    # this Gate will let a commit through.
+    requires_obligations:
+      - require-validation
 
   ledger:
     event_schema: harness/schemas/event.schema.json

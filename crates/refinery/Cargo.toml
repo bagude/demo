@@ -1,0 +1,23 @@
+[package]
+name = "refinery"
+description = "The Refinery: analyze operational state (the Ledger) and produce a reviewable patch against the harness spec — never against generated artifacts, never hot-patched into the running system."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "refinery"
+path = "src/lib.rs"
+
+[[bin]]
+name = "refinery"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+sha2 = { workspace = true }
+spec = { workspace = true }
+kernel = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

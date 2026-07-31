@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # GENERATED FROM: harness.patterns.yaml
-# SPEC HASH: sha256:2f5e6f998a975990b68df1c3884e66ead9e1d9b9742b65d6971b2e4f0fc7be8a
+# SPEC HASH: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
 # GENERATOR: harnessc 0.1.0
 # DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 # Guard Law: block edits outside the active packet's write scope.

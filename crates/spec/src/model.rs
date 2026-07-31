@@ -113,6 +113,11 @@ pub struct GateBinding {
     pub durable: Option<bool>,
     #[serde(default)]
     pub resume: Option<ResumeSpec>,
+    /// Obligation ids that must be discharged before this Gate will approve or
+    /// resume. This is how an Obligation Law is turned from "recorded" into
+    /// "enforced": the Gate refuses to proceed while the obligation is open.
+    #[serde(default)]
+    pub requires_obligations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -10,10 +10,12 @@
 //! A spec compiles only if it is structurally complete *and* every safety
 //! pattern it declares is fully specified.
 
+pub mod binding;
 pub mod check;
 pub mod compose;
 pub mod model;
 
+pub use binding::Binding;
 pub use check::{check, Diagnostic, Severity};
 pub use compose::Expr;
 pub use model::SpecFile;
@@ -60,17 +62,30 @@ impl std::fmt::Display for CompileError {
 
 impl std::error::Error for CompileError {}
 
-/// Parse and validate a `harness.patterns.yaml` from text.
+/// Parse a spec into its typed model without running the checker. Used by
+/// tools (like the Refinery) that inspect a spec but do not compile it.
+pub fn parse_model(yaml: &str) -> Result<SpecFile, CompileError> {
+    serde_yaml::from_str(yaml).map_err(|e| CompileError::Yaml(e.to_string()))
+}
+
+/// Peek the declared `platform.type` without running the full checker. Used to
+/// choose a default compiler back-end before a binding is selected.
+pub fn platform_of(yaml: &str) -> Result<String, CompileError> {
+    Ok(parse_model(yaml)?.platform.kind)
+}
+
+/// Parse and validate a `harness.patterns.yaml` from text against a target
+/// [`Binding`]'s capabilities.
 ///
 /// Returns the compiled model on success (carrying any warnings), or a
 /// [`CompileError`] describing every reason it was rejected.
-pub fn compile(yaml: &str) -> Result<CompiledSpec, CompileError> {
+pub fn compile(yaml: &str, binding: &dyn Binding) -> Result<CompiledSpec, CompileError> {
     let spec: SpecFile =
         serde_yaml::from_str(yaml).map_err(|e| CompileError::Yaml(e.to_string()))?;
     let composition =
         compose::parse(&spec.composition.expression).map_err(CompileError::Composition)?;
 
-    let diagnostics = check(&spec, &composition);
+    let diagnostics = check(&spec, &composition, binding);
     let errors: Vec<Diagnostic> = diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)

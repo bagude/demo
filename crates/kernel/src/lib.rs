@@ -41,6 +41,7 @@ pub mod gate;
 pub mod intake;
 pub mod law;
 pub mod ledger;
+pub mod obligation;
 pub mod packet;
 pub mod validate;
 

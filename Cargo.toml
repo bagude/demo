@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/kernel", "crates/spec", "crates/harnessc"]
+members = ["crates/kernel", "crates/spec", "crates/harnessc", "crates/refinery"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,5 +15,5 @@ serde_yaml = "0.9"
 toml = "0.8"
 sha2 = "0.10"
 tempfile = "3"
-kernel = { path = "crates/kernel" }
+kernel = { path = "crates/kernel", package = "harness-kernel" }
 spec = { path = "crates/spec" }

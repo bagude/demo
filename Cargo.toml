@@ -1,0 +1,25 @@
+[package]
+name = "intake"
+version = "0.1.0"
+edition = "2021"
+description = "The Intake pattern: work enters the system only as a typed, validated task packet recorded as append-only evidence."
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "intake"
+path = "src/main.rs"
+
+[lib]
+name = "intake"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

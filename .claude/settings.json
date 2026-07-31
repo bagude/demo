@@ -1,0 +1,36 @@
+{
+  "_generated": {
+    "from": "harness.patterns.yaml",
+    "generator": "harnessc 0.1.0",
+    "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
+    "spec_hash": "sha256:2f5e6f998a975990b68df1c3884e66ead9e1d9b9742b65d6971b2e4f0fc7be8a"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "harness/hooks/require_validation.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "harness/hooks/enforce_file_scope.sh",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [],
+    "deny": []
+  }
+}

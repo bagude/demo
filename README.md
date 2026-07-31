@@ -1,106 +1,124 @@
-# intake
+# patterns → harness compiler
 
-A small Rust implementation of **The Intake** pattern from
-*A Pattern Language for Agentic Composition*.
+An executable form of *A Pattern Language for Agentic Composition*. Instead of
+configuring an agent with hand-written Markdown, you **declare** a harness in
+`harness.patterns.yaml` and **compile** it into a Claude Code Playbook backed by
+a trusted runtime kernel.
 
-> **The Intake** — Work enters the system only as a typed artifact — objective,
-> constraints, files, acceptance criteria — never as loose conversation. The
-> packet becomes evidence in state, and the contract that Laws enforce against.
->
-> **Ingredients:** Invocable Workflow + structured task packet.
+```
+harness.patterns.yaml        (the spec — one system, declared)
+        │  harnessc build
+        ▼
+CLAUDE.md + .claude/ + harness/ + tasks/ evidence/ checkpoints/   (compiled Playbook)
+        │  runs on
+        ▼
+kernel  (the deterministic core the model operates inside)
+```
 
-This crate is that pattern made concrete: a typed **task packet**, the
-deterministic **Guard Laws** that gate its admission, an append-only **Ledger**
-that holds it as evidence, and a CLI — the **Invocable Workflow** — that ties
-them together.
+The compiler's job is not just to emit files — it is to **statically reject a
+composition that would lie about its guarantees**. A Gate whose approval binds
+to nothing but an artifact is a confirmation prompt, so the compiler refuses it.
+A Ledger that would log raw credentials is refused. A Law the kernel cannot
+actually enforce is refused rather than stubbed.
 
-## Why
+## The frozen specimen
 
-When multiple people or agents hand work to each other, ambiguity is the
-dominant failure mode. The Intake removes the "loose conversation" entry path:
-the *only* way work enters the system is a packet that names, up front, what
-"done" means, what may be touched, and how success is checked. Once admitted it
-is content-addressed evidence that later Laws can enforce against.
+The reference system is the Enablement Workbench:
 
-## The four named fields
+```
+Intake -> Verb within (Law + Gate) + Ledger
+```
 
-Every packet must carry the pattern's four fields, plus minimal provenance:
+Work enters only as a typed task packet (**Intake**); a command does the work
+(**Verb**) under a file-scope Guard Law and a commit Gate (**within (Law +
+Gate)**); every governed decision is appended to an event log (**Ledger**). Its
+declaration is [`harness.patterns.yaml`](harness.patterns.yaml).
 
-| Field                 | Meaning                                                        |
-|-----------------------|----------------------------------------------------------------|
-| `objective`           | What "done" looks like, specifically — not "fix the bug".      |
-| `constraints`         | Boundaries the work must respect (may be empty).               |
-| `files`               | Paths in scope, each `read` or `write`.                        |
-| `acceptance_criteria` | Mechanically checkable success statements (at least one).      |
+## Workspace
 
-The set of `write` paths is the contract a Guard Law enforces against
-(*"only files listed in the task packet may be edited"*).
+Three crates, mirroring the compiler pipeline:
 
-## Build / test
+| Crate | Role | Key contents |
+|-------|------|--------------|
+| [`spec`](crates/spec) | Compiler **front-end** (platform-agnostic) | metamodel, composition-algebra parser, the checker |
+| [`harnessc`](crates/harnessc) | Compiler **back-end** (claude-code binding) | generates the Playbook, stamps provenance |
+| [`harness-kernel`](crates/kernel) | Trusted **runtime kernel** | task packets, Guard Laws, Gate checkpoints, Ledger |
+
+The front-end knows nothing about Claude Code; a different backend could compile
+the same spec to a different platform. That split is the whole point of a
+portable pattern language.
+
+## Use it
 
 ```sh
 cargo build
-cargo test      # 20 tests: unit + end-to-end CLI + doctest
+
+# validate the spec — rejects incomplete or unsafe compositions
+./target/debug/harnessc check
+
+# inspect the compiled model before generating anything
+./target/debug/harnessc show
+
+# compile the Playbook into the repo (idempotent)
+./target/debug/harnessc build --out .
 ```
 
-## Usage
+Generated files carry a provenance header (`GENERATED FROM … / SPEC HASH … / DO
+NOT EDIT DIRECTLY`) so the source-of-truth hierarchy stays legible: edits flow
+*down* from the spec, never up from generated output.
+
+## What the compiler rejects (the interesting part)
+
+Each of these is a compile **error**, verified by tests in
+[`crates/spec/src/check.rs`](crates/spec/src/check.rs):
+
+- **`gate.missing_action_hash` / `gate.no_precondition_binding`** — a Gate whose
+  approval does not bind to the action *and* at least one material precondition.
+  Binding the artifact alone leaves a time-of-check/time-of-use gap.
+- **`ledger.redact_incomplete`** — a Ledger that would record `secrets` or
+  `credentials`. An append-only log of raw inputs is a durable credential leak.
+- **`law.unsupported`** — a Law the claude-code binding cannot enforce.
+  Generating a stub would pretend a guarantee that isn't there.
+- **`law.event_mismatch`** — a Guard bound post-tool or an Obligation pre-tool.
+- **`composition.referenced_but_unbound`** — a pattern named in the composition
+  with no binding supplied.
+- **Composition case law** — obligations that exist only because two patterns
+  meet: `Gate + NightShift` ⇒ durable, revalidating suspension;
+  `Sandbox + Ledger` ⇒ recorded lineage.
+
+## What the kernel actually enforces
+
+The generated hooks are thin shims; the enforcement lives in the compiled
+`kernel` binary, so it runs regardless of what the model decides:
+
+- **`enforce-file-scope`** (Guard Law) — reads a proposed tool call on stdin and
+  **blocks** (exit 2) any edit outside the active packet's write scope, logging
+  the allow/deny to the Ledger.
+- **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
+  bind approval to an action hash + precondition snapshot + approver + expiry,
+  and **revalidate at resume**: a changed action, drifted precondition, or
+  expired approval is refused. This is what lets a Gate work across process
+  death (cron, CI, a fresh container), not just in one session.
+- **Ledger** — an append-only event log whose envelope carries only references
+  and hashes, never raw payloads.
+
+`require-validation` is currently **recorded** (an obligation event is appended
+after each edit), not yet enforced end-to-end. The generated
+[`harness/README.md`](harness/README.md) states this plainly — nothing claims a
+guarantee the kernel does not provide.
+
+## Tests
 
 ```sh
-# 1. Emit a blank, annotated template (TOML, or --format json).
-intake template > my-task.toml
-
-# 2. Dry-run the Guard Laws without recording anything.
-intake validate my-task.toml
-
-# 3. Admit the packet: validate, then append it to the ledger as evidence.
-intake submit my-task.toml
-#   recorded 72912a5ae0e8 'Preserve rows in migration 0007' -> .intake/ledger.jsonl
-
-# 4. Read the evidence back.
-intake list
-intake show 72912a5           # full record as JSON, by task-id prefix
-
-# 5. Enforce the packet's file-scope contract (the Guard Law primitive).
-intake check-edit 72912a5 migrations/0007_backfill_ids.sql   # exit 0: allow
-intake check-edit 72912a5 src/secret.rs                       # exit 1: deny
+cargo test --workspace     # 50 tests: metamodel, checker rejections, kernel
+                           # enforcement, gate revalidation, generation
 ```
 
-The ledger location defaults to `.intake/ledger.jsonl` and can be overridden
-with `--ledger <path>`. A worked packet lives in
-[`examples/task-packet.toml`](examples/task-packet.toml).
+## Status and next steps
 
-## How it maps to the pattern
-
-| Pattern element                          | Where it lives                       |
-|------------------------------------------|--------------------------------------|
-| Structured task packet (typed template)  | `src/packet.rs`, `intake template`   |
-| Guard Laws (admission is deterministic)  | `src/validate.rs`                    |
-| Evidence in state (append-only)          | `src/ledger.rs`                      |
-| Invocable Workflow                       | `src/main.rs` (`submit`)             |
-| The contract Laws enforce against        | `files` scope + `check-edit`         |
-
-Design choices worth noting:
-
-- **Validate, then record — never the reverse.** `intake::admit` runs the Guard
-  Laws and only on success produces a record; there is no code path that stores
-  an unvalidated packet.
-- **Content-addressed evidence.** Each record carries a SHA-256 `content_hash`
-  over the packet and a `task_id` derived from it, so a reader can prove the
-  recorded bytes are the ones that were validated.
-- **Append-only.** The ledger handle opens strictly in append mode; a status
-  change is a *new* appended record, never an in-place edit — mirroring the
-  spec's *"historical evidence is append-only."*
-- **All violations at once.** Validation collects every problem so a submitter
-  fixes them in one pass.
-
-## Layout
-
-```
-src/packet.rs    TaskPacket, FileScope, IntakeRecord, content hashing
-src/validate.rs  the Guard Laws
-src/ledger.rs    append-only JSONL evidence store
-src/intake.rs    admit(): validate -> record
-src/clock.rs     dependency-free RFC 3339 UTC timestamps
-src/main.rs      the CLI (Invocable Workflow)
-tests/cli.rs     end-to-end tests driving the built binary
-```
+This is the **bootstrap** (Stage 0–2): a hand-built kernel plus a compiler that
+generates the specimen Playbook. Natural next increments, in the spec's own
+terms: discharge the `require-validation` obligation by wiring it into the Gate
+precondition; add more platform bindings behind the same front-end; and let a
+Refinery propose changes to `harness.patterns.yaml` — never to generated
+artifacts — closing the loop from operational state back to improved memory.

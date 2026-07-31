@@ -1,2 +1,7 @@
 /target
-/.intake
+
+# Runtime state produced by the kernel (not source, not generated artifacts).
+/evidence/*.jsonl
+/checkpoints/*.json
+/tasks/*.json
+.intake/

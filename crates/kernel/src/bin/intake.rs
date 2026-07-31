@@ -9,11 +9,11 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use intake::clock::now_rfc3339;
-use intake::intake::{admit, AdmitError};
-use intake::ledger::Ledger;
-use intake::packet::TaskPacket;
-use intake::validate::validate;
+use kernel::clock::now_rfc3339;
+use kernel::intake::{admit, AdmitError};
+use kernel::ledger::Ledger;
+use kernel::packet::TaskPacket;
+use kernel::validate::validate;
 
 /// The Intake pattern as a command: work enters only as a typed, validated
 /// task packet recorded as append-only evidence.
@@ -178,7 +178,7 @@ fn load_packet(path: &Path) -> Result<TaskPacket, Box<dyn std::error::Error>> {
     Ok(packet)
 }
 
-fn print_violations(report: &intake::validate::Report) {
+fn print_violations(report: &kernel::validate::Report) {
     eprintln!("rejected: {} violation(s)", report.violations.len());
     for v in &report.violations {
         eprintln!("  - {v}");

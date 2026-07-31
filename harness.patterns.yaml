@@ -1,0 +1,68 @@
+# The frozen specimen: Enablement Workbench.
+#
+#   Intake -> Verb within (Law + Gate) + Ledger
+#
+# This file is the SOURCE of the harness. The .claude/ and harness/ trees are
+# COMPILED from it by `harnessc build` and must not be hand-edited. Change the
+# system by changing this file and recompiling.
+
+harness:
+  name: enablement-workbench
+  version: 0.1.0
+
+composition:
+  expression: "Intake -> Verb within (Law + Gate) + Ledger"
+
+bindings:
+  intake:
+    task_schema: harness/schemas/task-packet.schema.json
+    storage: tasks/
+
+  verb:
+    name: pick-task
+    command: .claude/commands/pick-task.md
+    accepts: TaskPacket
+    produces: TaskResult
+
+  laws:
+    - id: enforce-file-scope
+      kind: guard
+      event: pre_tool
+      applies_to: [edit, write, delete]
+      implementation: harness/hooks/enforce_file_scope.sh
+
+    - id: require-validation
+      kind: obligation
+      event: post_tool
+      applies_to: [edit, write]
+      implementation: harness/hooks/require_validation.sh
+
+  gate:
+    id: approve-commit
+    boundary: before_commit
+    checkpoint_schema: harness/schemas/checkpoint.schema.json
+    bind:
+      - action_hash
+      - repository_revision
+      - working_tree_hash
+      - approver
+      - expiry
+
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact:
+      - secrets
+      - credentials
+      - raw_model_context
+
+platform:
+  type: claude-code
+  role_bindings:
+    boot_context: CLAUDE.md
+    invocable_workflow: .claude/commands/
+    event_interceptor: hooks
+    demand_loaded_knowledge: .claude/skills/
+    nested_executor: .claude/agents/
+    capability_port: mcp
+    unattended_entrypoint: claude-p

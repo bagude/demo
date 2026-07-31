@@ -1,0 +1,28 @@
+# A worked example task packet. Try it:
+#   cargo run -- validate examples/task-packet.toml
+#   cargo run -- submit   examples/task-packet.toml
+
+title = "Preserve rows in migration 0007"
+
+objective = "Ensure the 0007 migration does not drop rows whose id column is null"
+
+constraints = [
+  "No schema changes outside the migrations/ directory",
+  "Migration must remain reversible",
+]
+
+acceptance_criteria = [
+  "Row count is identical before and after applying 0007",
+  "cargo test passes",
+]
+
+submitted_by = "alice"
+priority = "high"
+
+[[files]]
+path = "migrations/0007_backfill_ids.sql"
+access = "write"
+
+[[files]]
+path = "src/schema.rs"
+access = "read"

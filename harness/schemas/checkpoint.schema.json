@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "_generated": {
+    "from": "harness.patterns.yaml",
+    "generator": "harnessc 0.1.0",
+    "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
+    "spec_hash": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
+  },
+  "properties": {
+    "action_hash": {
+      "type": "string"
+    },
+    "action_summary": {
+      "type": "string"
+    },
+    "approval": {
+      "properties": {
+        "action_hash": {
+          "type": "string"
+        },
+        "approved_at": {
+          "type": "string"
+        },
+        "approver": {
+          "type": "string"
+        },
+        "expiry": {
+          "type": "string"
+        },
+        "preconditions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "approver",
+        "action_hash",
+        "approved_at"
+      ],
+      "type": "object"
+    },
+    "continuation": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "gate_id": {
+      "type": "string"
+    },
+    "preconditions": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "requires_obligations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "gate_id",
+    "run_id",
+    "action_hash",
+    "action_summary",
+    "continuation",
+    "created_at"
+  ],
+  "title": "Checkpoint",
+  "type": "object"
+}

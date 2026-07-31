@@ -1,0 +1,30 @@
+[package]
+name = "harness-kernel"
+description = "The trusted runtime kernel: task packets, Guard Laws, append-only ledger, gate checkpoints. The deterministic core the model operates inside."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "kernel"
+path = "src/lib.rs"
+
+# The Intake demonstration CLI (validate/submit/list task packets).
+[[bin]]
+name = "intake"
+path = "src/bin/intake.rs"
+
+# The trusted kernel entrypoint that generated hooks invoke.
+[[bin]]
+name = "kernel"
+path = "src/bin/kernel.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

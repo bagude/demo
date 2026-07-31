@@ -1,0 +1,16 @@
+[package]
+name = "harnessc"
+description = "The pattern-language compiler back-end: compile a harness.patterns.yaml into a Claude Code Playbook (CLAUDE.md, .claude/, harness/, and directory scaffolding), with generated-file provenance headers."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "harnessc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+spec = { workspace = true }

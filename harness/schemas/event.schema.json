@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "_generated": {
+    "from": "harness.patterns.yaml",
+    "generator": "harnessc 0.1.0",
+    "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
+    "spec_hash": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
+  },
+  "properties": {
+    "action_id": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "allowed",
+        "denied",
+        "approved",
+        "rejected",
+        "recorded"
+      ]
+    },
+    "evidence_refs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "input_refs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "output_refs": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "parent_task_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "transition": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "action_id",
+    "actor",
+    "timestamp",
+    "transition",
+    "decision"
+  ],
+  "title": "Event",
+  "type": "object"
+}

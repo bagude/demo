@@ -234,19 +234,19 @@ impl GateStore {
     }
 
     fn checkpoint_path(&self, gate_id: &str, action_hash: &str) -> PathBuf {
-        // Drop any `algo:` prefix and keep a filesystem-safe short digest.
+        // Drop any `algo:` prefix but keep the FULL digest — truncating to a few
+        // characters would let distinct actions collide onto one checkpoint file.
         let digest = action_hash.rsplit(':').next().unwrap_or(action_hash);
-        let short = &digest[..digest.len().min(12)];
-        self.dir.join(format!("{gate_id}-{short}.json"))
+        self.dir.join(format!("{gate_id}-{digest}.json"))
     }
 
-    /// Persist a checkpoint durably (pretty JSON for human inspection).
+    /// Persist a checkpoint durably and atomically (pretty JSON for human
+    /// inspection). A crash mid-save can never leave a truncated checkpoint.
     pub fn save(&self, checkpoint: &Checkpoint) -> io::Result<PathBuf> {
-        fs::create_dir_all(&self.dir)?;
         let path = self.checkpoint_path(&checkpoint.gate_id, &checkpoint.action_hash);
         let json = serde_json::to_string_pretty(checkpoint)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        fs::write(&path, json)?;
+        crate::fsutil::atomic_write(&path, json.as_bytes())?;
         Ok(path)
     }
 

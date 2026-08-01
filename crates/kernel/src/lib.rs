@@ -38,6 +38,7 @@
 
 pub mod clock;
 pub mod event;
+pub mod fsutil;
 pub mod gate;
 pub mod hive;
 pub mod intake;

@@ -429,8 +429,10 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // Gate + Night Shift ⇒ durable suspension and precondition revalidation.
-    if expr.contains(PatternKind::Gate) && expr.contains(PatternKind::NightShift) {
+    // A Gate *governed by* a Night Shift (running within, or downstream of, an
+    // unattended run) ⇒ durable suspension and precondition revalidation. A Gate
+    // in an independent branch is used attended and needs neither.
+    if expr.governs(PatternKind::NightShift, PatternKind::Gate) {
         if let Some(gate) = &b.gate {
             let durable = gate.durable == Some(true);
             let resume_ok = gate
@@ -479,9 +481,9 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // Port + retry/resumption/unattended ⇒ replay safety. An unattended run that
-    // retries an external write needs an idempotency key.
-    if expr.contains(PatternKind::Port) && expr.contains(PatternKind::NightShift) {
+    // A Port *governed by* a Night Shift (runs unattended, with retry/resumption)
+    // ⇒ replay safety. A Port in an independent, attended branch does not.
+    if expr.governs(PatternKind::NightShift, PatternKind::Port) {
         for p in b
             .ports
             .iter()
@@ -499,9 +501,10 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // Sandbox + Port ⇒ external isolation. Copy-on-write isolates the filesystem,
-    // not the world; a sandboxed Port write must be isolated, disabled, or a proposal.
-    if expr.contains(PatternKind::Sandbox) && expr.contains(PatternKind::Port) {
+    // A Port running *within* a Sandbox ⇒ external isolation. Copy-on-write
+    // isolates the filesystem, not the world; a sandboxed Port write must be
+    // isolated, disabled, or a proposal. A Port outside the sandbox is unaffected.
+    if expr.is_within(PatternKind::Port, PatternKind::Sandbox) {
         for p in b
             .ports
             .iter()
@@ -518,9 +521,9 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // Hive + Gate ⇒ approval scope must be declared: global vs. per-worker are
-    // different systems.
-    if expr.contains(PatternKind::Hive) && expr.contains(PatternKind::Gate) {
+    // A Gate *within* a Hive ⇒ approval scope must be declared: global vs.
+    // per-worker are different systems. A Gate outside the Hive is unaffected.
+    if expr.is_within(PatternKind::Gate, PatternKind::Hive) {
         for h in b.hives.iter().filter(|h| h.approval_scope.is_none()) {
             d.push(Diagnostic::error(
                 "composition.hive_gate_approval_scope",
@@ -692,6 +695,26 @@ platform: { type: claude-code }
     }
 
     #[test]
+    fn a_gate_independent_of_the_night_shift_need_not_be_durable() {
+        // The reviewer's case: a Gate in one branch, a Night Shift in another.
+        // The old presence-based rule wrongly fired; the relational rule does not.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "NightShift + Gate"
+bindings:
+  night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
+  gate:
+    id: g
+    boundary: before_deploy
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+platform: { type: claude-code }
+"#;
+        assert!(!codes(&check_yaml(yaml)).contains(&"composition.gate_nightshift_durable"));
+    }
+
+    #[test]
     fn sandbox_plus_ledger_without_lineage_is_rejected() {
         let yaml = r#"
 harness: { name: n, version: 0.1.0 }
@@ -804,7 +827,7 @@ platform: { type: claude-code }
     fn sandbox_plus_port_without_isolation_is_rejected() {
         let yaml = r#"
 harness: { name: n, version: 0.1.0 }
-composition: { expression: "Sandbox + Port" }
+composition: { expression: "Port within Sandbox" }
 bindings:
   sandbox: { workspace: branch }
   laws:
@@ -820,7 +843,7 @@ platform: { type: claude-code }
     fn port_writes_unattended_without_idempotency_is_rejected() {
         let yaml = r#"
 harness: { name: n, version: 0.1.0 }
-composition: { expression: "NightShift + Port" }
+composition: { expression: "NightShift -> Port" }
 bindings:
   night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
   laws:
@@ -833,7 +856,54 @@ platform: { type: claude-code }
     }
 
     #[test]
+    fn a_port_independent_of_the_night_shift_needs_no_replay_safety() {
+        // Topology matters: an attended Port coexisting with an unattended run
+        // is a different system and must NOT trip the replay-safety rule.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "NightShift + Port" }
+bindings:
+  night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: gh, server: github, write: [comments], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(!codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
+    }
+
+    #[test]
     fn hive_with_gate_needs_approval_scope() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "(Gate within Hive) + Delegate" }
+bindings:
+  delegates:
+    - { id: w, agent: a.md, contract_schema: s.json, tools: [Read] }
+  gate:
+    id: g
+    boundary: before_merge
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+  hives:
+    - id: h
+      orchestrator: o.md
+      worker: w
+      fan_out: dynamic
+      budget: 100
+      max_depth: 2
+      termination: done
+      merge: root
+      worker_isolation: disjoint
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.hive_gate_approval_scope"));
+    }
+
+    #[test]
+    fn a_gate_independent_of_the_hive_needs_no_approval_scope() {
+        // A Gate coexisting with (but not inside) a Hive is a separate system.
         let yaml = r#"
 harness: { name: n, version: 0.1.0 }
 composition: { expression: "Hive + Gate + Delegate" }
@@ -857,6 +927,6 @@ bindings:
       worker_isolation: disjoint
 platform: { type: claude-code }
 "#;
-        assert!(codes(&check_yaml(yaml)).contains(&"composition.hive_gate_approval_scope"));
+        assert!(!codes(&check_yaml(yaml)).contains(&"composition.hive_gate_approval_scope"));
     }
 }

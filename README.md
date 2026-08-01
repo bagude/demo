@@ -34,11 +34,14 @@ Work enters only as a typed task packet (**Intake**); a command does the work
 Gate)**); every governed decision is appended to an event log (**Ledger**). Its
 declaration is [`harness.patterns.yaml`](harness.patterns.yaml).
 
-All fourteen v1.2 patterns are bindable. Beyond the specimen, two example specs
+All fourteen v1.2 patterns are bindable. Beyond the specimen, example specs
 exercise the scale patterns — [`examples/research-org.patterns.yaml`](examples/research-org.patterns.yaml)
 (`(Delegate × 3) -> Critic -> Refinery + Ledger + Hive + Port`) and
 [`examples/safe-deploy.patterns.yaml`](examples/safe-deploy.patterns.yaml)
-(`(Pipeline within Law) -> Gate + Ledger`).
+(`(Pipeline within Law) -> Gate + Ledger`) — and one shows **instance
+addressability**: [`examples/instance-addressed.patterns.yaml`](examples/instance-addressed.patterns.yaml)
+(`(Port[staging] within Sandbox) -> Gate + Port[metrics] + Law + Ledger`), where
+a derived obligation binds to `Port[staging]` and leaves its sibling alone.
 
 ## Workspace
 
@@ -106,16 +109,22 @@ Each of these is a compile **error**, verified by tests in
   reference declared Ports (never broader authority than granted).
 - **`hive.*`** — the Law of the Hive: a Hive must declare budget, depth,
   termination, merge, worker isolation, and a real worker contract.
-- **Composition case law (relation-aware)** — obligations that exist only
-  because two patterns meet *in a particular topology*. The checker asks the
-  composition AST relational questions (`is_within`, `flows_to`, `provisions`,
-  `governs`, `may_execute_concurrently`), not mere presence, so a Gate in one
-  independent branch and a Night Shift in another do **not** trip the rule.
-  A Gate **governed by** a Night Shift ⇒ durable, revalidating suspension; a
-  Port governed by a Night Shift ⇒ replay-safe idempotency; a Port **within** a
-  Sandbox ⇒ declared external isolation; a Gate **within** a Hive ⇒ declared
-  approval scope; **`Obligation Law + Gate`** ⇒ the obligation discharged
-  *through* the Gate; `Sandbox + Ledger` ⇒ recorded lineage.
+- **Composition case law (relation-aware, instance-addressed)** — obligations
+  that exist only because two patterns meet *in a particular topology*. The
+  checker asks the composition AST direction-honest relational questions
+  (`is_within`, `flows_to`, `provisions`, `flow_connected`, `runs_under`,
+  `may_execute_concurrently`), not mere presence, so a Gate in one independent
+  branch and a Night Shift in another do **not** trip the rule. A Gate **running
+  under** a Night Shift ⇒ durable, revalidating suspension; a Port on the
+  unattended data path ⇒ replay-safe idempotency; a Port **within** a Sandbox ⇒
+  declared external isolation; a Gate **within** a Hive ⇒ declared approval
+  scope; **`Obligation Law + Gate`** ⇒ the obligation discharged *through* the
+  Gate; `Sandbox + Ledger` ⇒ recorded lineage. Occurrences are
+  **instance-addressable**: `Port[staging] within Sandbox + Port[metrics]`
+  attaches the isolation obligation to `staging` alone — the derived obligation
+  binds to the named component, not to every Port binding. A bare `Port`
+  conservatively still stands for every Port binding. See
+  [`examples/instance-addressed.patterns.yaml`](examples/instance-addressed.patterns.yaml).
 
 ## Enforcement honesty
 
@@ -125,12 +134,18 @@ Each of these is a compile **error**, verified by tests in
 prints it per pattern, and `harness/playbook.json` records it:
 
 ```
-Gate         kernel-mediated
+Gate         runtime-enforced
 Law          runtime-enforced
 Ledger       runtime-monitored
 Port         statically-checked
 Delegate     scaffolded
 ```
+
+The top rung, `kernel-mediated`, is intentionally **unclaimed**: it would
+require a conformance proof that the effect *cannot* occur without passing the
+kernel, and nothing in the current binding demonstrates that. The Gate is a
+registered hook (runtime-enforced), not proven-complete mediation — so the
+taxonomy says `runtime-enforced` and reserves the stronger word.
 
 ## What the kernel actually enforces
 
@@ -202,27 +217,37 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 104 tests: metamodel, checker rejections for every
-                           # pattern, composition parser + case law, kernel
-                           # enforcement + self-protection + Law of the Hive, gate
-                           # revalidation + obligations, playbook_ref run binding,
-                           # both backends, example specs, and the Refinery ratchet
+cargo test --workspace     # 115 tests: metamodel, checker rejections for every
+                           # pattern, composition parser + precedence + instance
+                           # addressability + case law, kernel enforcement +
+                           # self-protection + Law of the Hive, gate revalidation +
+                           # obligations, playbook_ref run binding, both backends,
+                           # example specs, and the Refinery ratchet
 ```
 
 ## Status and next steps
 
 Aligned to constitution **v1.2**, with **all fourteen patterns bindable** and a
-**relation-aware** composition checker. Hardening from external review is in:
-obligations are scoped per run; file authority is decided on normalized path
-components (traversal/absolute rejected); checkpoints are written atomically
-(temp → fsync → rename → dir-fsync) with full-digest names and the Ledger is
-fsynced; and approver identity distinguishes a *claimed* label from an
-authenticated principal.
+**relation-aware, instance-addressable** composition checker. Hardening from two
+external reviews is in: occurrences carry identity (`Port[staging]`), so a
+derived obligation attaches to the named component rather than the pattern
+category; the operator grammar has a **formal precedence** (`+` loosest) so a
+mixed expression parses one way; the direction-reversing `governs` relation was
+removed in favor of `flow_connected` / `runs_under`; obligations are scoped per
+run; file authority is decided on **platform-independent** normalized components
+(absolute, `..`, backslash, drive-letter and alternate-data-stream vectors all
+rejected); checkpoints are written atomically (temp → fsync → rename → dir-fsync)
+with hashed, injection-safe names and the Ledger is fsynced; and approver
+identity distinguishes a *claimed* label from an authenticated principal.
 
-Documented follow-ups (not yet done): a **unified transition protocol**
-(Proposed→Authorized→Executing→…→Recorded) to turn the independent runtime
-modules into one execution kernel; **transactional Hive budget** reservations;
-a **tamper-evident Ledger** (sequence + prev-hash chain); **symlink/canonical**
-resolution for existing write targets; a real **IdP/signature** integration for
-approvals; a **Python/OpenAI-Agents** back-end behind the same `Binding`; and
-version-promotion tooling for approved Refinery proposals.
+Documented follow-ups (not yet done): **semantically-typed relations** sourced
+from bindings (a Delegate's declared Port list as an `invokes`/`uses` edge, not
+inferred from the linear expression); a **declared obligation scope** (`run |
+task | branch | workspace | action`) so parallel workers in one run discharge
+independently; a **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded)
+to turn the independent runtime modules into one execution kernel;
+**transactional Hive budget** reservations; a **tamper-evident Ledger** (sequence
++ prev-hash chain); **symlink/canonical** resolution for existing write targets;
+a real **IdP/signature** integration for approvals; a **Python/OpenAI-Agents**
+back-end behind the same `Binding`; and version-promotion tooling for approved
+Refinery proposals.

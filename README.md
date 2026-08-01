@@ -97,6 +97,11 @@ multiple targets.
 
 ## Going deeper
 
+**Why this exists** — the principles, stated as articles and each tied to
+the running code that enforces it — is
+[`docs/DECLARATION.md`](docs/DECLARATION.md): a declaration of
+institutional agentic governance.
+
 The full design rationale — the composition algebra, what the compiler
 rejects and why, the enforcement taxonomy, the identity chain, and the
 documented boundaries of every guarantee — is in

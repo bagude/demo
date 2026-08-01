@@ -48,6 +48,47 @@ pub mod obligation;
 pub mod packet;
 pub mod validate;
 
+/// The kernel's own implementation source, embedded at compile time. Hashing
+/// these bytes yields a content-addressed identity for the enforcement binary
+/// itself — one that changes whenever the enforcement logic changes, even if no
+/// version number is bumped. This is deliberately the *source* rather than the
+/// built executable: it is deterministic across toolchains, so two builds of the
+/// same source agree, while two different source trees never collide.
+const KERNEL_SOURCE: &[&str] = &[
+    include_str!("lib.rs"),
+    include_str!("event.rs"),
+    include_str!("law.rs"),
+    include_str!("gate.rs"),
+    include_str!("obligation.rs"),
+    include_str!("packet.rs"),
+    include_str!("validate.rs"),
+    include_str!("intake.rs"),
+    include_str!("ledger.rs"),
+    include_str!("hive.rs"),
+    include_str!("clock.rs"),
+    include_str!("fsutil.rs"),
+    include_str!("bin/kernel.rs"),
+    include_str!("bin/intake.rs"),
+];
+
+/// Content digest of the kernel implementation that is executing — the runtime
+/// identity stamped into every governed [`Event`]. Length-prefixed per source
+/// unit so no rearrangement of file boundaries can produce a collision.
+pub fn kernel_ref() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for src in KERNEL_SOURCE {
+        hasher.update((src.len() as u64).to_le_bytes());
+        hasher.update(src.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut s = String::from("sha256:");
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 pub use event::{Decision, Event, EventLog};
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
 pub use hive::{first_write_conflict, validate_spawn, HiveViolation, SpawnRequest};
@@ -56,3 +97,28 @@ pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, Law
 pub use ledger::Ledger;
 pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
 pub use validate::{validate, Report, Violation};
+
+#[cfg(test)]
+mod kernel_ref_tests {
+    use super::*;
+
+    #[test]
+    fn kernel_ref_is_a_stable_sha256() {
+        let a = kernel_ref();
+        let b = kernel_ref();
+        assert_eq!(a, b, "the running binary has one identity");
+        assert!(a.starts_with("sha256:"));
+        assert_eq!(a.len(), "sha256:".len() + 64);
+    }
+
+    #[test]
+    fn kernel_ref_is_content_addressed_to_the_real_implementation() {
+        // Guard against a regression to a version-label identity: the digest must
+        // fold in the actual enforcement source, so the embedded corpus really is
+        // the kernel's own code (e.g. the pre-tool guard entrypoint).
+        assert!(!KERNEL_SOURCE.is_empty());
+        let corpus: String = KERNEL_SOURCE.concat();
+        assert!(corpus.contains("blocked by enforce-file-scope"));
+        assert!(corpus.contains("fn pre_tool"));
+    }
+}

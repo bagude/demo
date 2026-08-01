@@ -456,6 +456,7 @@ mod tests {
             decision,
             evidence_refs: vec![],
             playbook_ref: None,
+            kernel_ref: String::new(),
             attempt_id: None,
         }
     }

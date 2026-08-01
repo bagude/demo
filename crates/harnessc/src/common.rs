@@ -206,21 +206,49 @@ pub fn ir_digest(compiled: &spec::CompiledSpec) -> String {
     )
 }
 
-/// The identity of the compiler that produced an artifact: this crate's
-/// version, the front-end's, the IR schema version, and the target binding.
+/// The compiler's own implementation source — the front-end (`spec`) and this
+/// back-end — embedded at compile time. Hashing these bytes is what makes
+/// `compiler_ref` a genuine *implementation* reference rather than a version
+/// label: two materially different source trees produce different references
+/// even when neither bumped its package version, which is exactly the failure
+/// mode that let a stale artifact keep calling itself `0.1.0`. Source rather
+/// than the built binary keeps the digest deterministic across toolchains.
+const COMPILER_SOURCE: &[&str] = &[
+    // front-end (spec crate): metamodel, parser, resolver, checker
+    include_str!("../../spec/src/lib.rs"),
+    include_str!("../../spec/src/model.rs"),
+    include_str!("../../spec/src/binding.rs"),
+    include_str!("../../spec/src/compose.rs"),
+    include_str!("../../spec/src/graph.rs"),
+    include_str!("../../spec/src/check.rs"),
+    // back-end (this crate): the code that turns the resolved IR into a bundle
+    include_str!("main.rs"),
+    include_str!("common.rs"),
+    include_str!("backend/mod.rs"),
+    include_str!("backend/claude_code.rs"),
+    include_str!("backend/portable.rs"),
+];
+
+/// The identity of the compiler that produced an artifact: a content digest of
+/// the compiler and front-end **implementation source**, folded together with
+/// the IR schema version and the target binding.
 ///
 /// Source provenance and executable provenance are different things — the same
 /// `harness.patterns.yaml` compiled by a different compiler can govern a
-/// materially different system. Binding only the spec bytes would let a stale
-/// or divergent artifact carry a matching reference.
+/// materially different system. Binding only the spec bytes (or only version
+/// labels, which two divergent trees can share) would let a stale or divergent
+/// artifact carry a matching reference. Hashing the implementation source closes
+/// that gap: change the compiler, change the reference.
 pub fn compiler_digest(target: &str) -> String {
-    sha256_hex(
-        format!(
-            "harnessc={GENERATOR_VERSION};spec={};ir_schema={IR_SCHEMA_VERSION};target={target}",
-            spec::VERSION
-        )
-        .as_bytes(),
-    )
+    let mut buf: Vec<u8> = Vec::new();
+    for src in COMPILER_SOURCE {
+        // Length-prefix each unit so file boundaries can't be shuffled into a
+        // collision.
+        buf.extend_from_slice(&(src.len() as u64).to_le_bytes());
+        buf.extend_from_slice(src.as_bytes());
+    }
+    buf.extend_from_slice(format!(";ir_schema={IR_SCHEMA_VERSION};target={target}").as_bytes());
+    sha256_hex(&buf)
 }
 
 /// The full identity chain for a compiled Playbook.
@@ -414,7 +442,7 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision"],
+        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "kernel_ref"],
         "properties": {
             "run_id": { "type": "string" },
             "task_id": { "type": "string" },
@@ -428,6 +456,7 @@ pub fn event_schema() -> Value {
             "decision": { "enum": ["allowed", "denied", "approved", "rejected", "recorded"] },
             "evidence_refs": { "type": "array", "items": { "type": "string" } },
             "playbook_ref": { "type": "string" },
+            "kernel_ref": { "type": "string" },
             "attempt_id": { "type": "string" }
         }
     })
@@ -446,4 +475,62 @@ pub fn schema_files(prov: &Prov, spec: &spec::SpecFile) -> Vec<GenFile> {
         out.push(prov.json_file(&ledger.event_schema, event_schema()));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiler_digest_is_content_addressed_not_a_version_label() {
+        // Regression guard for the exact historical failure: a version-label
+        // identity would collide across divergent trees at the same version.
+        // The digest must NOT equal a hash of the old label string.
+        let target = "claude-code";
+        let old_label = sha256_hex(
+            format!(
+                "harnessc={GENERATOR_VERSION};spec={};ir_schema={IR_SCHEMA_VERSION};target={target}",
+                spec::VERSION
+            )
+            .as_bytes(),
+        );
+        assert_ne!(
+            compiler_digest(target),
+            old_label,
+            "compiler_ref must fold in implementation source, not just version labels"
+        );
+    }
+
+    #[test]
+    fn compiler_digest_embeds_the_real_implementation() {
+        // The embedded corpus is genuinely the compiler's own code, so any
+        // change to generation or checking changes the reference.
+        assert!(!COMPILER_SOURCE.is_empty());
+        let corpus: String = COMPILER_SOURCE.concat();
+        assert!(corpus.contains("fn compiler_digest"));
+        assert!(corpus.contains("impl Backend for ClaudeCode"));
+    }
+
+    #[test]
+    fn compiler_digest_distinguishes_targets() {
+        assert_ne!(
+            compiler_digest("claude-code"),
+            compiler_digest("portable"),
+            "a different target is a different compiler identity"
+        );
+    }
+
+    #[test]
+    fn event_schema_requires_the_runtime_kernel_identity() {
+        // A governed event must carry which kernel executed it; the schema makes
+        // that mandatory rather than conventional.
+        let schema = event_schema();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(required.contains(&"kernel_ref"));
+    }
 }

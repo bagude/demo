@@ -307,6 +307,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 decision: Decision::Recorded,
                 evidence_refs: vec![],
                 playbook_ref,
+                kernel_ref: kernel::kernel_ref(),
                 attempt_id: None,
             };
             EventLog::at(&ledger).append(&event)?;
@@ -371,6 +372,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 decision: Decision::Recorded,
                 evidence_refs,
                 playbook_ref,
+                kernel_ref: kernel::kernel_ref(),
                 attempt_id: None,
             };
             EventLog::at(&ledger).append(&event)?;
@@ -426,6 +428,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 decision: decision.into(),
                 evidence_refs,
                 playbook_ref,
+                kernel_ref: kernel::kernel_ref(),
                 attempt_id,
             };
             EventLog::at(&ledger).append(&event)?;
@@ -475,6 +478,7 @@ fn pre_tool(
             decision,
             evidence_refs: vec![],
             playbook_ref,
+            kernel_ref: kernel::kernel_ref(),
             attempt_id: None,
         };
         EventLog::at(ledger).append(&event)?;
@@ -537,6 +541,7 @@ fn pre_bash(
             },
             evidence_refs: vec![],
             playbook_ref,
+            kernel_ref: kernel::kernel_ref(),
             attempt_id: None,
         };
         EventLog::at(ledger).append(&event)?;

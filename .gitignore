@@ -10,3 +10,8 @@
 # regenerable on demand — not committed.
 /refinery/proposals/
 /dist/
+
+# Local build state: versioned bundle copies and the current-bundle pointer,
+# maintained by `harnessc build`. Regenerable; the checked-in Playbook and its
+# bundle manifest are the committed artifacts.
+/.harnessc/

@@ -145,12 +145,21 @@ that this one no longer generates, which would otherwise remain live behavior
 no current Playbook accounts for. A workspace test runs it against this
 repository's own Playbook, so a stale artifact fails CI instead of shipping.
 
-`harnessc build` promotes the bundle without ever presenting a torn Playbook:
-the complete bundle is staged as fsynced tmp siblings first (the live tree
-untouched), then promoted by atomic renames; obsolete files are retired before
-the manifest is replaced, and the manifest is promoted **last** as the commit
-point. A crash mid-promotion leaves the old manifest describing the old set, so
-`verify` reports the exact divergence rather than trusting either version.
+`harnessc build` promotes the bundle without ever presenting a torn Playbook,
+in two layers. First, the **versioned copy**: the complete bundle is
+materialized under `.harnessc/bundles/<playbook-ref>/`, fsynced, and
+self-verified there (bytes, modes, types) before the live tree is touched — so
+there is always a whole, coherent Playbook on disk, and `.harnessc/current`
+keeps naming the old version until the new one has fully landed. Then the
+**live tree**: files staged as fsynced tmp siblings, promoted by atomic
+renames; obsolete files retired before the manifest is replaced; the manifest
+promoted last; and finally `current` atomically switched to the new bundle as
+the bundle-level commit point. The previously-current version is retained as
+the rollback source (older ones are pruned), and `verify` cross-checks the
+pointer when present — a crash mid-promotion leaves the old manifest and old
+pointer describing the old set, so `verify` reports the exact divergence
+rather than trusting either version. `.harnessc/` is local build state, not
+checked in.
 
 ## What the compiler rejects (the interesting part)
 

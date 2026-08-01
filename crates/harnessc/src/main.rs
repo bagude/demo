@@ -125,7 +125,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             };
             let refs = common::refs(&compiled, &hash, backend.platform());
             let generated = backend.generate(&compiled, &refs);
-            let problems = verify_bundle(&generated, &out);
+            let problems = verify_bundle(&generated, &refs, &out);
             if problems.is_empty() {
                 println!(
                     "fresh: {} generated file(s) match playbook {}",
@@ -201,8 +201,155 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 return Ok(ExitCode::SUCCESS);
             }
 
+            // The versioned copy first: the COMPLETE bundle is materialized,
+            // fsynced, and self-verified under .harnessc/bundles/<ref> before
+            // the live tree is touched — so there is always a whole, coherent
+            // Playbook on disk, and `current` keeps naming the old one until
+            // the new one has fully landed.
+            let bundle_dir = bundle_version_dir(&out, &refs.playbook_ref);
+            let staging = stage_bundle_version(&generated, &bundle_dir)?;
+            let staged_problems = verify_bundle(&generated, &refs, &staging);
+            if !staged_problems.is_empty() {
+                for p in &staged_problems {
+                    eprintln!("  {p}");
+                }
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err("staged bundle failed self-verification; live tree untouched".into());
+            }
+            commit_bundle_version(&staging, &bundle_dir)?;
+            println!("  bundle {} (verified)", bundle_dir.display());
+
+            let previous = read_current_pointer(&out);
             promote_bundle(&generated, &out, &obsolete)?;
+            switch_current_pointer(&out, &refs, &bundle_dir)?;
+            println!("  current -> {}", refs.playbook_ref);
+            prune_bundles(&out, &bundle_dir, previous.as_ref());
             Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Local build state kept under the output tree: versioned bundle copies and
+/// the current-bundle pointer. Not part of the generated Playbook (and not
+/// checked in) — it is what promotion and rollback stand on.
+const HARNESSC_STATE_DIR: &str = ".harnessc";
+
+/// Where the versioned copy of bundle `playbook_ref` lives under `out`.
+fn bundle_version_dir(out: &Path, playbook_ref: &str) -> PathBuf {
+    let hex = playbook_ref.strip_prefix("sha256:").unwrap_or(playbook_ref);
+    out.join(HARNESSC_STATE_DIR).join("bundles").join(hex)
+}
+
+fn current_pointer_path(out: &Path) -> PathBuf {
+    out.join(HARNESSC_STATE_DIR).join("current")
+}
+
+/// The (playbook_ref, bundle-relative-path) the current pointer records, if a
+/// parseable pointer exists.
+fn read_current_pointer(out: &Path) -> Option<(String, String)> {
+    let text = std::fs::read_to_string(current_pointer_path(out)).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some((
+        v.get("playbook_ref")?.as_str()?.to_string(),
+        v.get("bundle")?.as_str()?.to_string(),
+    ))
+}
+
+/// Materialize the complete bundle in a staging directory beside its final
+/// versioned home: full tree, final modes, fsynced files. Returns the staging
+/// path; nothing outside `.harnessc` is touched.
+fn stage_bundle_version(
+    generated: &common::Generated,
+    final_dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let name = final_dir
+        .file_name()
+        .ok_or("bundle dir has a name")?
+        .to_string_lossy();
+    let staging = final_dir.with_file_name(format!(".staging-{name}"));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    for file in &generated.files {
+        let target = staging.join(&file.path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_file_with_mode(&target, &file.content, common::file_mode(&file.path))?;
+    }
+    Ok(staging)
+}
+
+/// Swap the verified staging tree into place as the versioned bundle. For a
+/// same-ref rebuild the old copy is renamed aside first, so the only window
+/// without a complete versioned copy is the instant between two renames.
+fn commit_bundle_version(
+    staging: &Path,
+    final_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let name = final_dir
+        .file_name()
+        .ok_or("bundle dir has a name")?
+        .to_string_lossy()
+        .into_owned();
+    if final_dir.exists() {
+        let aside = final_dir.with_file_name(format!(".old-{name}"));
+        if aside.exists() {
+            std::fs::remove_dir_all(&aside)?;
+        }
+        std::fs::rename(final_dir, &aside)?;
+        std::fs::rename(staging, final_dir)?;
+        let _ = std::fs::remove_dir_all(&aside);
+    } else {
+        std::fs::rename(staging, final_dir)?;
+    }
+    fsync_dir(final_dir.parent());
+    Ok(())
+}
+
+/// Atomically switch `.harnessc/current` to the new bundle — the bundle-level
+/// commit point, flipped only after the live tree has fully promoted. The
+/// pointer stores the ref and a relative bundle path, so the workspace can
+/// move.
+fn switch_current_pointer(
+    out: &Path,
+    refs: &common::Refs,
+    bundle_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pointer = current_pointer_path(out);
+    if let Some(parent) = pointer.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let rel = bundle_dir.strip_prefix(out).unwrap_or(bundle_dir);
+    let body = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "playbook_ref": refs.playbook_ref,
+            "bundle": rel.to_string_lossy(),
+        }))?
+    );
+    let tmp = pointer.with_file_name("current.harnessc-tmp");
+    write_file_with_mode(&tmp, &body, "0644")?;
+    std::fs::rename(&tmp, &pointer)?;
+    fsync_dir(pointer.parent());
+    Ok(())
+}
+
+/// Retain the new bundle and the previously-current one (the rollback
+/// source); remove every other version — including stale staging or aside
+/// directories left by an interrupted build — so `.harnessc` cannot grow
+/// without bound.
+fn prune_bundles(out: &Path, keep_new: &Path, previous: Option<&(String, String)>) {
+    let bundles = out.join(HARNESSC_STATE_DIR).join("bundles");
+    let keep_prev: Option<PathBuf> = previous.map(|(_, rel)| out.join(rel));
+    for entry in std::fs::read_dir(&bundles).into_iter().flatten().flatten() {
+        let p = entry.path();
+        if !p.is_dir() || p == *keep_new || keep_prev.as_deref() == Some(p.as_path()) {
+            continue;
+        }
+        match std::fs::remove_dir_all(&p) {
+            Ok(()) => println!("  pruned {}", p.display()),
+            Err(e) => eprintln!("warning: could not prune {}: {e}", p.display()),
         }
     }
 }
@@ -221,10 +368,23 @@ fn bundle_manifest_file(generated: &common::Generated) -> Option<&common::GenFil
 /// stripped (which silently stops running), or a path replaced by a symlink.
 /// Each of those is a behavioral divergence, so each is a verification
 /// failure: path set, bytes, type, and mode are all part of the proof.
-fn verify_bundle(generated: &common::Generated, out: &Path) -> Vec<String> {
+fn verify_bundle(generated: &common::Generated, refs: &common::Refs, out: &Path) -> Vec<String> {
     let mut problems = Vec::new();
     let expected: std::collections::BTreeSet<&str> =
         generated.files.iter().map(|f| f.path.as_str()).collect();
+
+    // The current-bundle pointer, when present, must name this playbook: a
+    // mismatch means the live tree and the recorded promotion disagree (a
+    // partially landed build, or a rebuild by a different compiler). Absence
+    // is fine — a fresh clone carries no local build state.
+    if let Some((ptr_ref, _)) = read_current_pointer(out) {
+        if ptr_ref != refs.playbook_ref {
+            problems.push(format!(
+                "pointer:  {HARNESSC_STATE_DIR}/current names playbook {ptr_ref}, expected {}",
+                refs.playbook_ref
+            ));
+        }
+    }
 
     // Obsolete detection: the previous build's manifest records the path set
     // it managed. Anything it lists that this compiler no longer generates —
@@ -356,9 +516,15 @@ fn stage_file(target: &Path, content: &str, mode: &str) -> std::io::Result<PathB
     let mut name = target.file_name().unwrap_or_default().to_os_string();
     name.push(".harnessc-tmp");
     let tmp = target.with_file_name(name);
+    write_file_with_mode(&tmp, content, mode)?;
+    Ok(tmp)
+}
+
+/// Write full bytes with the final mode, fsynced.
+fn write_file_with_mode(path: &Path, content: &str, mode: &str) -> std::io::Result<()> {
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut f = std::fs::File::create(path)?;
         f.write_all(content.as_bytes())?;
         f.sync_all()?;
     }
@@ -366,11 +532,11 @@ fn stage_file(target: &Path, content: &str, mode: &str) -> std::io::Result<PathB
     {
         use std::os::unix::fs::PermissionsExt;
         let bits = if mode == "0755" { 0o755 } else { 0o644 };
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(bits))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))?;
     }
     #[cfg(not(unix))]
     let _ = mode;
-    Ok(tmp)
+    Ok(())
 }
 
 /// Durably record a rename by fsyncing the containing directory (Unix; other

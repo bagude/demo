@@ -207,6 +207,105 @@ fn verify_detects_a_file_replaced_by_a_symlink() {
     );
 }
 
+fn current_pointer(out: &Path) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(out.join(".harnessc/current")).unwrap()).unwrap()
+}
+
+#[test]
+fn build_materializes_a_versioned_bundle_and_switches_current() {
+    let dir = scratch("versioned");
+    let out = dir.join("out");
+    let v1 = write_spec(&dir, "v1.yaml", SPEC_WITH_SPECIALIST);
+    assert!(harnessc(&["build"], &v1, &out).status.success());
+
+    // The pointer names the promoted playbook and its versioned copy...
+    let ptr = current_pointer(&out);
+    let playbook_ref = ptr["playbook_ref"].as_str().unwrap();
+    assert!(playbook_ref.starts_with("sha256:"));
+    let bundle = out.join(ptr["bundle"].as_str().unwrap());
+    assert!(
+        bundle.ends_with(format!(
+            ".harnessc/bundles/{}",
+            playbook_ref.trim_start_matches("sha256:")
+        )),
+        "the bundle directory is addressed by the playbook ref"
+    );
+    // ...and that copy is the COMPLETE coherent bundle, not a mirror of
+    // whatever landed: spot-check both ends of the set.
+    assert!(bundle.join("CLAUDE.md").exists());
+    assert!(bundle.join(MANIFEST_PATH).exists());
+    assert!(bundle.join(SKILL_PATH).exists());
+
+    // The live tree verifies, pointer included.
+    assert!(harnessc(&["verify"], &v1, &out).status.success());
+}
+
+#[test]
+fn previous_bundle_is_retained_for_rollback_and_older_pruned() {
+    let dir = scratch("prune");
+    let out = dir.join("out");
+    let v1 = write_spec(&dir, "v1.yaml", SPEC_WITH_SPECIALIST);
+    let v2 = write_spec(&dir, "v2.yaml", SPEC_WITHOUT_SPECIALIST);
+
+    assert!(harnessc(&["build"], &v1, &out).status.success());
+    let ref_a = current_pointer(&out)["playbook_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(harnessc(&["build"], &v2, &out).status.success());
+    let ref_b = current_pointer(&out)["playbook_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(ref_a, ref_b);
+
+    let bundles = out.join(".harnessc/bundles");
+    let dirs = |bundles: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(bundles)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    // Current + previous retained: the previous bundle is the rollback source.
+    let hex = |r: &str| r.trim_start_matches("sha256:").to_string();
+    assert_eq!(dirs(&bundles), {
+        let mut v = vec![hex(&ref_a), hex(&ref_b)];
+        v.sort();
+        v
+    });
+
+    // A third build (back to v1) keeps {new, previous}: nothing unbounded.
+    assert!(harnessc(&["build"], &v1, &out).status.success());
+    assert_eq!(dirs(&bundles).len(), 2, "retention is exactly two versions");
+    assert_eq!(current_pointer(&out)["playbook_ref"], ref_a.as_str());
+}
+
+#[test]
+fn verify_flags_a_stale_current_pointer() {
+    let dir = scratch("pointer");
+    let out = dir.join("out");
+    let v1 = write_spec(&dir, "v1.yaml", SPEC_WITH_SPECIALIST);
+    assert!(harnessc(&["build"], &v1, &out).status.success());
+
+    // A pointer naming some other promotion: live tree and recorded promotion
+    // now disagree, which verification must surface.
+    let pointer = out.join(".harnessc/current");
+    let doctored = std::fs::read_to_string(&pointer)
+        .unwrap()
+        .replace("sha256:", "sha256:0000");
+    std::fs::write(&pointer, doctored).unwrap();
+
+    let verified = harnessc(&["verify"], &v1, &out);
+    assert!(!verified.status.success(), "a stale pointer fails verify");
+    assert!(
+        String::from_utf8_lossy(&verified.stderr).contains("pointer"),
+        "named as a pointer problem"
+    );
+}
+
 #[test]
 fn manifest_inventories_every_file_except_itself() {
     let dir = scratch("inventory");

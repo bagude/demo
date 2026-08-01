@@ -289,7 +289,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         out.push(GenFile {
             path: APPROVE_COMMIT_HOOK.to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding (per run).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\"{requires}\n",
                 header = prov.hash_header(),
             ),
         });

@@ -88,6 +88,9 @@ enum Command {
         ledger: PathBuf,
         #[arg(long = "require")]
         require: Vec<String>,
+        /// The run whose obligations are evaluated (obligations are per-run).
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
     },
     /// Discharge an obligation: optionally run a check command, and on success
     /// append a discharge event so a Gate that requires it can proceed.
@@ -285,7 +288,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             EventLog::at(&ledger).append(&event)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::PreCommit { ledger, require } => {
+        Command::PreCommit {
+            ledger,
+            require,
+            run_id,
+        } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
             // Only a git commit is gated here; everything else passes.
@@ -293,7 +300,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 return Ok(ExitCode::SUCCESS);
             }
             let events = EventLog::at(&ledger).read_all().unwrap_or_default();
-            let outstanding = kernel::obligation::outstanding(&events, &require);
+            let outstanding = kernel::obligation::outstanding(&events, &require, &run_id);
             if outstanding.is_empty() {
                 Ok(ExitCode::SUCCESS)
             } else {
@@ -623,7 +630,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 };
                 let events = EventLog::at(&ledger).read_all()?;
                 let outstanding =
-                    kernel::obligation::outstanding(&events, &cp.requires_obligations);
+                    kernel::obligation::outstanding(&events, &cp.requires_obligations, &cp.run_id);
                 if let Err(e) = cp.check_obligations(&outstanding) {
                     eprintln!("gate refused: {e}");
                     return Ok(ExitCode::FAILURE);

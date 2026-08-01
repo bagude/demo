@@ -184,6 +184,11 @@ enum GateCmd {
         require_obligations: Vec<String>,
         #[arg(long, default_value = "checkpoints")]
         checkpoints: PathBuf,
+        /// Ledger whose chain head to anchor into the checkpoint. Refuses a
+        /// broken chain; at resume, `gate verify --ledger` refuses a log whose
+        /// history no longer contains the anchored head (tail truncation).
+        #[arg(long)]
+        ledger: Option<PathBuf>,
     },
     /// Record an approval against a persisted checkpoint.
     Approve {
@@ -667,11 +672,26 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             preconditions,
             require_obligations,
             checkpoints,
+            ledger,
         } => {
             let action_hash = match (action_hash, action_file) {
                 (Some(h), _) => h,
                 (None, Some(file)) => hash_file(&file)?,
                 (None, None) => return Err("provide --action-hash or --action-file".into()),
+            };
+            // Anchor the Ledger's chain head into the durable checkpoint —
+            // the out-of-band pin that makes tail truncation detectable at
+            // resume. A chain that is already broken is refused outright: a
+            // checkpoint must not notarize corrupt history.
+            let ledger_head = match &ledger {
+                None => None,
+                Some(l) => match EventLog::at(l).verify_chain() {
+                    Ok(report) => report.head,
+                    Err(e) => {
+                        eprintln!("refusing to checkpoint over a broken ledger chain: {e}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                },
             };
             let checkpoint = Checkpoint::new(
                 gate,
@@ -682,7 +702,8 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 parse_preconditions(&preconditions)?,
                 now_rfc3339(),
             )
-            .requiring_obligations(require_obligations);
+            .requiring_obligations(require_obligations)
+            .anchoring_ledger_head(ledger_head);
             let path = GateStore::at(&checkpoints).save(&checkpoint)?;
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
@@ -738,16 +759,32 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             // The Gate also refuses to resume while a required obligation is
             // outstanding — this is how "recorded" becomes "enforced".
             if !cp.requires_obligations.is_empty() {
-                let Some(ledger) = ledger else {
+                let Some(ledger) = ledger.as_ref() else {
                     return Err(
                         "checkpoint requires obligations; pass --ledger to evaluate them".into(),
                     );
                 };
-                let events = EventLog::at(&ledger).read_all()?;
+                let events = EventLog::at(ledger).read_all()?;
                 let outstanding =
                     kernel::obligation::outstanding(&events, &cp.requires_obligations, &cp.run_id);
                 if let Err(e) = cp.check_obligations(&outstanding) {
                     eprintln!("gate refused: {e}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+
+            // The anchored chain head must still be in the log's history: the
+            // checkpoint pinned it precisely so that a tail truncated (or a
+            // log rewritten) while the Gate was closed is refused, not
+            // silently resumed over.
+            if let Some(head) = &cp.ledger_head {
+                let Some(ledger) = ledger.as_ref() else {
+                    return Err(
+                        "checkpoint anchors the ledger head; pass --ledger to verify it".into(),
+                    );
+                };
+                if let Err(e) = EventLog::at(ledger).verify_anchor(head) {
+                    eprintln!("gate refused: ledger integrity: {e}");
                     return Ok(ExitCode::FAILURE);
                 }
             }

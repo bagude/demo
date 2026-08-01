@@ -518,6 +518,7 @@ pub fn checkpoint_schema() -> Value {
             "continuation": { "type": "string" },
             "created_at": { "type": "string" },
             "requires_obligations": { "type": "array", "items": { "type": "string" } },
+            "ledger_head": { "type": "string" },
             "approval": {
                 "type": "object",
                 "required": ["approver", "action_hash", "approved_at"],

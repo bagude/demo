@@ -57,6 +57,22 @@ enum Command {
         #[arg(long)]
         target: Option<String>,
     },
+    /// Restore the live tree from a retained versioned bundle
+    /// (.harnessc/bundles), self-verifying the copy against its own manifest
+    /// before touching anything. Files the currently-live bundle has that the
+    /// restored one lacks are retired, exactly as a build would.
+    Restore {
+        /// Directory the harness lives in.
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        /// Playbook ref (or unique prefix) to restore. Defaults to the current
+        /// pointer's bundle — a re-materialization of the active version.
+        #[arg(long)]
+        playbook: Option<String>,
+        /// List retained bundles instead of restoring.
+        #[arg(long)]
+        list: bool,
+    },
     /// Validate, then generate the harness.
     Build {
         #[arg(long, default_value = "harness.patterns.yaml")]
@@ -180,16 +196,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             // whatever fell out of the generated set since then is retired
             // during promotion, so a hook or command this compiler no longer
             // emits does not remain live behavior in the harness.
-            let expected: std::collections::BTreeSet<&str> =
-                generated.files.iter().map(|f| f.path.as_str()).collect();
-            let obsolete: Vec<String> = bundle_manifest_file(&generated)
-                .and_then(|m| common::read_manifest_paths(&out.join(&m.path)))
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|p| !expected.contains(p.as_str()))
-                .filter(|p| is_safe_bundle_path(p))
-                .filter(|p| out.join(p).symlink_metadata().is_ok())
-                .collect();
+            let obsolete = obsolete_paths(&generated, &out);
 
             if dry_run {
                 for file in &generated.files {
@@ -221,12 +228,217 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
             let previous = read_current_pointer(&out);
             promote_bundle(&generated, &out, &obsolete)?;
-            switch_current_pointer(&out, &refs, &bundle_dir)?;
+            switch_current_pointer(&out, &refs.playbook_ref, &bundle_dir)?;
             println!("  current -> {}", refs.playbook_ref);
             prune_bundles(&out, &bundle_dir, previous.as_ref());
             Ok(ExitCode::SUCCESS)
         }
+        Command::Restore {
+            out,
+            playbook,
+            list,
+        } => {
+            if list {
+                let current = read_current_pointer(&out).map(|(r, _)| r);
+                let bundles = out.join(HARNESSC_STATE_DIR).join("bundles");
+                let mut names: Vec<String> = std::fs::read_dir(&bundles)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|e| e.path().is_dir())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| !n.starts_with('.'))
+                    .collect();
+                names.sort();
+                if names.is_empty() {
+                    println!("(no retained bundles — run `harnessc build` first)");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                let current_hex = current
+                    .as_deref()
+                    .map(|c| c.strip_prefix("sha256:").unwrap_or(c).to_string());
+                for name in names {
+                    let marker = if current_hex.as_deref() == Some(name.as_str()) {
+                        "  (current)"
+                    } else {
+                        ""
+                    };
+                    println!("sha256:{name}{marker}");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+
+            let bundle_dir = resolve_bundle_dir(&out, playbook.as_deref())?;
+            // Self-verify the retained copy BEFORE touching anything: a
+            // rollback source that cannot prove itself is not a rollback
+            // source, and the live tree stays untouched.
+            let (playbook_ref, generated) = load_bundle(&bundle_dir)?;
+            println!(
+                "restoring playbook {playbook_ref}\n  from {}",
+                bundle_dir.display()
+            );
+            // Rolling BACK must also retire what rolled FORWARD introduced:
+            // the live manifest names what is managed now, and anything the
+            // restored bundle lacks comes out.
+            let obsolete = obsolete_paths(&generated, &out);
+            promote_bundle(&generated, &out, &obsolete)?;
+            switch_current_pointer(&out, &playbook_ref, &bundle_dir)?;
+            println!("  current -> {playbook_ref}");
+            // No pruning on restore: both the restored version and the one
+            // just rolled back from stay retained.
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+/// Paths the live tree's manifest lists that `generated` no longer contains —
+/// sanitized and still existing — i.e. the files promotion must retire.
+fn obsolete_paths(generated: &common::Generated, out: &Path) -> Vec<String> {
+    let expected: std::collections::BTreeSet<&str> =
+        generated.files.iter().map(|f| f.path.as_str()).collect();
+    bundle_manifest_file(generated)
+        .and_then(|m| common::read_manifest_paths(&out.join(&m.path)))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !expected.contains(p.as_str()))
+        .filter(|p| is_safe_bundle_path(p))
+        .filter(|p| out.join(p).symlink_metadata().is_ok())
+        .collect()
+}
+
+/// The bundle directory to restore from: an explicit ref (or unique prefix)
+/// matched against the retained set, or the current pointer's bundle.
+fn resolve_bundle_dir(
+    out: &Path,
+    playbook: Option<&str>,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let Some(spec) = playbook else {
+        let (_, rel) = read_current_pointer(out).ok_or(
+            "no current-bundle pointer; pass --playbook <ref> or run `harnessc build` first",
+        )?;
+        return Ok(out.join(rel));
+    };
+    let want = spec.strip_prefix("sha256:").unwrap_or(spec);
+    let bundles = out.join(HARNESSC_STATE_DIR).join("bundles");
+    let mut matches: Vec<PathBuf> = std::fs::read_dir(&bundles)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            !name.starts_with('.') && name.starts_with(want)
+        })
+        .map(|e| e.path())
+        .collect();
+    match matches.len() {
+        0 => Err(
+            format!("no retained bundle matches '{spec}' (see `harnessc restore --list`)").into(),
+        ),
+        1 => Ok(matches.remove(0)),
+        n => Err(format!("'{spec}' is ambiguous: {n} retained bundles match").into()),
+    }
+}
+
+/// Load and self-verify a retained bundle against its own manifest: every
+/// listed file must be a regular file whose bytes hash to the recorded
+/// digest, and the directory must be named by the manifest's playbook_ref.
+/// Returns the ref and the file set with the manifest last — promotion-ready.
+fn load_bundle(
+    bundle_dir: &Path,
+) -> Result<(String, common::Generated), Box<dyn std::error::Error>> {
+    let manifest_rel =
+        find_bundle_manifest(bundle_dir).ok_or("retained bundle has no bundle.manifest.json")?;
+    let manifest_text = std::fs::read_to_string(bundle_dir.join(&manifest_rel))?;
+    let v: serde_json::Value = serde_json::from_str(&manifest_text)?;
+    let playbook_ref = v
+        .pointer("/_generated/playbook_ref")
+        .and_then(|p| p.as_str())
+        .ok_or("retained manifest lacks _generated.playbook_ref")?
+        .to_string();
+    let hex = playbook_ref
+        .strip_prefix("sha256:")
+        .unwrap_or(&playbook_ref);
+    let dir_name = bundle_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if dir_name != hex {
+        return Err(format!(
+            "bundle directory '{dir_name}' does not match its manifest's playbook_ref \
+             {playbook_ref} — refusing a renamed or spliced bundle"
+        )
+        .into());
+    }
+
+    let entries = v
+        .get("files")
+        .and_then(|f| f.as_array())
+        .ok_or("retained manifest has no files inventory")?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry
+            .get("path")
+            .and_then(|p| p.as_str())
+            .ok_or("manifest entry has no path")?;
+        if !is_safe_bundle_path(path) {
+            return Err(format!("retained manifest names an unsafe path: {path}").into());
+        }
+        let full = bundle_dir.join(path);
+        let md = std::fs::symlink_metadata(&full)
+            .map_err(|e| format!("retained bundle is missing {path}: {e}"))?;
+        if !md.file_type().is_file() {
+            return Err(format!("retained bundle: {path} is not a regular file").into());
+        }
+        let content =
+            std::fs::read_to_string(&full).map_err(|e| format!("retained bundle: {path}: {e}"))?;
+        let want = entry
+            .get("digest")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| format!("manifest entry for {path} has no digest"))?;
+        let got = common::sha256_hex(content.as_bytes());
+        if got != want {
+            return Err(format!(
+                "retained bundle is corrupt: {path} hashes to {got}, manifest records {want}"
+            )
+            .into());
+        }
+        files.push(common::GenFile {
+            path: path.to_string(),
+            content,
+        });
+    }
+    // The manifest itself, last: the same commit-point ordering promotion
+    // relies on for a build.
+    files.push(common::GenFile {
+        path: manifest_rel,
+        content: manifest_text,
+    });
+    Ok((playbook_ref, common::Generated { files }))
+}
+
+/// The bundle manifest's path within a retained bundle directory, relative to
+/// it (backends place it differently: `harness/` for claude-code, the root
+/// for portable).
+fn find_bundle_manifest(dir: &Path) -> Option<String> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .file_name()
+                .is_some_and(|n| n == common::BUNDLE_MANIFEST_FILENAME)
+            {
+                return p
+                    .strip_prefix(dir)
+                    .ok()
+                    .map(|r| r.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 /// Local build state kept under the output tree: versioned bundle copies and
@@ -313,7 +525,7 @@ fn commit_bundle_version(
 /// move.
 fn switch_current_pointer(
     out: &Path,
-    refs: &common::Refs,
+    playbook_ref: &str,
     bundle_dir: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pointer = current_pointer_path(out);
@@ -324,7 +536,7 @@ fn switch_current_pointer(
     let body = format!(
         "{}\n",
         serde_json::to_string_pretty(&serde_json::json!({
-            "playbook_ref": refs.playbook_ref,
+            "playbook_ref": playbook_ref,
             "bundle": rel.to_string_lossy(),
         }))?
     );

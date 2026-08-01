@@ -161,6 +161,15 @@ pointer describing the old set, so `verify` reports the exact divergence
 rather than trusting either version. `.harnessc/` is local build state, not
 checked in.
 
+`harnessc restore` rolls the live tree back to any retained version — or
+re-materializes the active one — without recompiling: the retained copy is
+**self-verified against its own manifest** before anything is touched (a
+rollback source that cannot prove itself is not a rollback source), files the
+live bundle has that the restored one lacks are retired exactly as a build
+would, and the `current` pointer follows. `harnessc restore --list` enumerates
+the retained versions and marks the active one; `--playbook` accepts a full
+ref or unique prefix.
+
 ## What the compiler rejects (the interesting part)
 
 Each of these is a compile **error**, verified by tests in
@@ -383,11 +392,6 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   event type and in the generated schema — so the record distinguishes which
   kernel ran, not just which spec governed; an empty value is explicit legacy
   state, never an ordinary governed event.
-- **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
-  bind approval to an action hash + precondition snapshot + approver + expiry,
-  and **revalidate at resume**: a changed action, drifted precondition, or
-  expired approval is refused. This is what lets a Gate work across process
-  death (cron, CI, a fresh container), not just in one session.
 - **`require-validation`** (Obligation Law) — an obligation event is recorded
   after each edit, and the commit gate hook **blocks `git commit`** (exit 2)
   while it is outstanding. `kernel validate` discharges it (optionally gated on a
@@ -400,6 +404,11 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   and **revalidate at resume**: a changed action, drifted precondition, expired
   approval, or outstanding obligation is refused. This is what lets a Gate work
   across process death (cron, CI, a fresh container), not just in one session.
+  `gate request --ledger` additionally **anchors the Ledger's chain head** into
+  the checkpoint (refusing to notarize a broken chain), and `gate verify
+  --ledger` refuses to resume over a log whose history no longer contains the
+  anchored head — the durable checkpoint is exactly the out-of-band place the
+  chain's one blind spot needs.
 - **Ledger** — an append-only event log whose envelope carries only references
   and hashes, never raw payloads. Append-only is a *property*, not a posture:
   every record carries a contiguous `seq` and a `prev` digest of the previous
@@ -407,8 +416,9 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   insertion, mid-deletion, and reordering are detected anywhere in history,
   and a pre-chain legacy prefix is frozen the moment the first chained record
   commits to it. The one stated limitation: tail truncation leaves a shorter
-  but internally consistent chain, so `verify` prints the chain **head** for
-  anchoring outside the file (a checkpoint, a push, a signed note). Racing
+  but internally consistent chain, so the chain **head** must be anchored
+  outside the file — which Gate checkpoints now do (`gate request --ledger`);
+  `verify` also prints it for any other anchor (a push, a signed note). Racing
   writers produce a visible fork the verifier reports, never a silently merged
   history.
 

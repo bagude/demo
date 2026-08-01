@@ -18,9 +18,11 @@
 //! thing a chain cannot prove is **tail truncation**: deleting the newest
 //! records leaves a shorter but internally consistent chain. That requires
 //! anchoring the chain *head* (the digest of the last line, reported by
-//! `verify_chain`) somewhere outside the file — a Gate checkpoint, a push, a
-//! signed note. The chain makes the log self-verifying up to its head; the
-//! head is the caller's to anchor.
+//! `verify_chain`) somewhere outside the file. Gate checkpoints are the
+//! first-class anchor: `kernel gate request --ledger` pins the head into the
+//! durable checkpoint, and [`EventLog::verify_anchor`] is what `gate verify`
+//! runs to refuse a log whose history no longer contains it. Any other
+//! out-of-band home (a push, a signed note) works the same way.
 //!
 //! Concurrent appenders are not serialized by this handle; racing writers
 //! produce a visible fork (duplicate `seq`, dangling `prev`) that
@@ -140,7 +142,17 @@ pub struct Record {
 #[derive(Debug)]
 pub enum ChainError {
     Io(io::Error),
-    Broken { line: usize, reason: String },
+    Broken {
+        line: usize,
+        reason: String,
+    },
+    /// An externally anchored head names history the log no longer contains:
+    /// the tail was truncated (or the whole log rewritten) past the anchor.
+    /// This is the failure the chain alone cannot see — it exists only
+    /// because something outside the file (a Gate checkpoint) kept the head.
+    AnchorMissing {
+        head: String,
+    },
 }
 
 impl std::fmt::Display for ChainError {
@@ -148,6 +160,11 @@ impl std::fmt::Display for ChainError {
         match self {
             ChainError::Io(e) => write!(f, "io: {e}"),
             ChainError::Broken { line, reason } => write!(f, "line {line}: {reason}"),
+            ChainError::AnchorMissing { head } => write!(
+                f,
+                "anchored head {head} is not in the ledger's history — the tail was truncated \
+                 or the log rewritten since the anchor was taken"
+            ),
         }
     }
 }
@@ -248,14 +265,41 @@ impl EventLog {
     /// record *after* chained history is a break. Returns the [`ChainReport`]
     /// whose `head` is what tail-truncation detection must anchor externally.
     pub fn verify_chain(&self) -> Result<ChainReport, ChainError> {
+        self.walk().map(|(report, _)| report)
+    }
+
+    /// Verify the chain AND that `head` still names a line in history — the
+    /// anchor check that closes the tail-truncation gap. Every line's bytes
+    /// include its `prev`, so a line's digest transitively commits to the
+    /// entire prefix before it: finding the anchored head among the line
+    /// digests proves the history up to the anchor is byte-identical to when
+    /// the anchor was taken. A missing head means the tail was truncated past
+    /// it, or the log rewritten — refused either way.
+    pub fn verify_anchor(&self, head: &str) -> Result<ChainReport, ChainError> {
+        let (report, digests) = self.walk()?;
+        if digests.iter().any(|d| d == head) {
+            Ok(report)
+        } else {
+            Err(ChainError::AnchorMissing {
+                head: head.to_string(),
+            })
+        }
+    }
+
+    /// The shared chain walk: proves the chain and collects every line's
+    /// digest (for anchor membership checks).
+    fn walk(&self) -> Result<(ChainReport, Vec<String>), ChainError> {
         let text = match fs::read_to_string(&self.path) {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(ChainReport {
-                    records: 0,
-                    chained: 0,
-                    head: None,
-                })
+                return Ok((
+                    ChainReport {
+                        records: 0,
+                        chained: 0,
+                        head: None,
+                    },
+                    Vec::new(),
+                ))
             }
             Err(e) => return Err(ChainError::Io(e)),
         };
@@ -263,6 +307,7 @@ impl EventLog {
         let mut chained = 0usize;
         let mut prev_hash: Option<String> = None;
         let mut next_seq: Option<u64> = None;
+        let mut digests: Vec<String> = Vec::new();
         for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
             let n = i + 1;
             records += 1;
@@ -322,13 +367,18 @@ impl EventLog {
                 next_seq = Some(seq + 1);
                 chained += 1;
             }
-            prev_hash = Some(line_digest(line));
+            let digest = line_digest(line);
+            digests.push(digest.clone());
+            prev_hash = Some(digest);
         }
-        Ok(ChainReport {
-            records,
-            chained,
-            head: prev_hash,
-        })
+        Ok((
+            ChainReport {
+                records,
+                chained,
+                head: prev_hash,
+            },
+            digests,
+        ))
     }
 
     /// Read every event in insertion order. A missing log reads as empty.
@@ -536,6 +586,51 @@ mod tests {
         std::fs::write(log.path(), text).unwrap();
         let err = log.verify_chain().unwrap_err();
         assert!(err.to_string().contains("unchained record"), "{err}");
+    }
+
+    #[test]
+    fn verify_anchor_accepts_any_head_still_in_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 2);
+        let anchor = log.verify_chain().unwrap().head.unwrap();
+
+        // The anchor holds at the moment it was taken...
+        assert!(log.verify_anchor(&anchor).is_ok());
+        // ...and stays valid as the log grows: a line's digest commits to the
+        // whole prefix, so an older head is proof the history beneath it is
+        // byte-identical.
+        log.append(&event(Decision::Denied)).unwrap();
+        assert!(log.verify_anchor(&anchor).is_ok());
+    }
+
+    #[test]
+    fn verify_anchor_refuses_truncation_past_the_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 3);
+        let anchor = log.verify_chain().unwrap().head.unwrap();
+
+        // Truncate below the anchor: the remaining chain is internally
+        // consistent — exactly the blind spot — but the anchor is gone.
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let truncated: Vec<&str> = text.lines().take(2).collect();
+        std::fs::write(log.path(), truncated.join("\n") + "\n").unwrap();
+        assert!(log.verify_chain().is_ok(), "the chain alone cannot see it");
+        let err = log.verify_anchor(&anchor).unwrap_err();
+        assert!(
+            matches!(err, ChainError::AnchorMissing { .. }),
+            "the anchor can: {err}"
+        );
+    }
+
+    #[test]
+    fn verify_anchor_still_reports_a_broken_chain_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 3);
+        let anchor = log.verify_chain().unwrap().head.unwrap();
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        std::fs::write(log.path(), text.replacen("\"allowed\"", "\"denied\"", 1)).unwrap();
+        let err = log.verify_anchor(&anchor).unwrap_err();
+        assert!(matches!(err, ChainError::Broken { .. }), "{err}");
     }
 
     #[test]

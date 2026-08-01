@@ -1,7 +1,7 @@
 <!--
   GENERATED FROM: harness.patterns.yaml
   SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
-  PLAYBOOK: sha256:7e2ce1e14822042e88eb03e7bd36788fe85ce41881f2778789dce78c21fe9be1
+  PLAYBOOK: sha256:6d10575aa618ceaf8a3f81212dfaa9765e0ca68114d49d26ac17efa5cd46a979
   GENERATOR: harnessc 0.1.0
   DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 -->

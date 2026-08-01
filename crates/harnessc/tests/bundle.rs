@@ -306,6 +306,108 @@ fn verify_flags_a_stale_current_pointer() {
     );
 }
 
+/// Run `harnessc restore` (no --spec: restore works from the retained copy).
+fn restore(args: &[&str], out: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_harnessc"))
+        .arg("restore")
+        .arg("--out")
+        .arg(out)
+        .args(args)
+        .output()
+        .expect("harnessc runs")
+}
+
+#[test]
+fn restore_rolls_the_live_tree_back_and_forward() {
+    let dir = scratch("restore");
+    let out = dir.join("out");
+    let v1 = write_spec(&dir, "v1.yaml", SPEC_WITH_SPECIALIST);
+    let v2 = write_spec(&dir, "v2.yaml", SPEC_WITHOUT_SPECIALIST);
+
+    assert!(harnessc(&["build"], &v1, &out).status.success());
+    let ref_a = current_pointer(&out)["playbook_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(harnessc(&["build"], &v2, &out).status.success());
+    let ref_b = current_pointer(&out)["playbook_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!out.join(SKILL_PATH).exists(), "v2 retired the skill");
+
+    // --list shows both retained versions and marks the current one.
+    let listed = restore(&["--list"], &out);
+    assert!(listed.status.success());
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains(&ref_a) && stdout.contains(&ref_b));
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains(&ref_b) && l.contains("(current)")),
+        "the active version is marked: {stdout}"
+    );
+
+    // Roll BACK to v1 by unique prefix: the retired artifact returns, the
+    // pointer follows, and the tree verifies against the v1 spec again.
+    let prefix = &ref_a.trim_start_matches("sha256:")[..12];
+    let rolled = restore(&["--playbook", prefix], &out);
+    assert!(
+        rolled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rolled.stderr)
+    );
+    assert!(out.join(SKILL_PATH).exists(), "the rollback restored it");
+    assert_eq!(current_pointer(&out)["playbook_ref"], ref_a.as_str());
+    assert!(harnessc(&["verify"], &v1, &out).status.success());
+
+    // Roll FORWARD to v2 again: restore retires what the restored bundle
+    // lacks, exactly as a build would.
+    let rolled = restore(&["--playbook", &ref_b], &out);
+    assert!(rolled.status.success());
+    assert!(
+        !out.join(SKILL_PATH).exists(),
+        "restore retires files outside the restored set"
+    );
+    assert!(harnessc(&["verify"], &v2, &out).status.success());
+}
+
+#[test]
+fn restore_refuses_a_corrupt_retained_bundle() {
+    let dir = scratch("restore-corrupt");
+    let out = dir.join("out");
+    let v1 = write_spec(&dir, "v1.yaml", SPEC_WITH_SPECIALIST);
+    let v2 = write_spec(&dir, "v2.yaml", SPEC_WITHOUT_SPECIALIST);
+
+    assert!(harnessc(&["build"], &v1, &out).status.success());
+    let ref_a = current_pointer(&out)["playbook_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(harnessc(&["build"], &v2, &out).status.success());
+
+    // Tamper the retained copy of v1: a rollback source that cannot prove
+    // itself is not a rollback source.
+    let retained_skill = out
+        .join(".harnessc/bundles")
+        .join(ref_a.trim_start_matches("sha256:"))
+        .join(SKILL_PATH);
+    let text = std::fs::read_to_string(&retained_skill).unwrap();
+    std::fs::write(&retained_skill, text + "tampered\n").unwrap();
+
+    let rolled = restore(&["--playbook", &ref_a], &out);
+    assert!(
+        !rolled.status.success(),
+        "a corrupt bundle must not restore"
+    );
+    assert!(
+        String::from_utf8_lossy(&rolled.stderr).contains("corrupt"),
+        "the refusal names the corruption"
+    );
+    // The live tree was never touched: still v2, still verifying.
+    assert!(harnessc(&["verify"], &v2, &out).status.success());
+}
+
 #[test]
 fn manifest_inventories_every_file_except_itself() {
     let dir = scratch("inventory");

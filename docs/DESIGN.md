@@ -490,8 +490,14 @@ default `run`): the spec says whose debt an edit opens and what discharges it
 — per run, following the task packet across runs (keyed by packet digest),
 following the git branch, globally, or per edited path — with a stated
 fail-safe (a debt that cannot be proven discharged for the asking context
-blocks, including unkeyed legacy records); file authority is decided on
-**platform-independent**
+blocks, including unkeyed legacy records); the Hive budget is a
+**transactional pool** — one durable state file per Hive, mutated only under
+an exclusive lock, where `hive-spawn` atomically reserves a spawn's budget
+before it runs (refused when the pool cannot cover it, idempotent on replay)
+and `hive settle` records actual spend and returns the remainder, so racing
+spawns serialize instead of jointly overshooting a caller-claimed cap, and
+every grant, refusal, and settlement is Ledger evidence; file authority is
+decided on **platform-independent**
 normalized components (absolute, `..`, backslash, drive-letter and
 alternate-data-stream vectors all rejected) and judged against the
 **canonical target** on the real filesystem — symlinks in the existing
@@ -560,7 +566,7 @@ replication multiplicity instead of the compiler refusing the ambiguity. Beyond 
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
-**transactional Hive budget** reservations; an **online IdP protocol adapter**
+an **online IdP protocol adapter**
 (OIDC issuance, directory sync) binding the identity authority itself to
 organizational infrastructure — the offline trust core (authority-signed
 registries with expiry and revocation) exists; a

@@ -413,7 +413,11 @@ fn pattern_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         .iter()
         .filter(|h| g.is_active(PatternKind::Hive, &h.id))
     {
-        out.push(hive_orchestrator(prov, h));
+        out.push(hive_orchestrator(
+            prov,
+            h,
+            &ledger_destination(&compiled.spec),
+        ));
     }
     let active_ports: Vec<_> = b
         .ports
@@ -510,21 +514,29 @@ fn pipeline_command(prov: &Prov, p: &PipelineBinding) -> GenFile {
     }
 }
 
-fn hive_orchestrator(prov: &Prov, h: &HiveBinding) -> GenFile {
+fn hive_orchestrator(prov: &Prov, h: &HiveBinding, ledger: &str) -> GenFile {
     let mut body = prov.md_header();
     body.push('\n');
     body.push_str(&format!(
-        "# /{} — Hive orchestrator\n\nCoordinates fan-out and merge. **{:?}** fan-out; workers are \
+        "# /{id} — Hive orchestrator\n\nCoordinates fan-out and merge. **{:?}** fan-out; workers are \
          `{}` delegates; results merge to `{}`.\n\n## Law of the Hive (kernel-validated when invoked)\n\n\
          Every spawned task must have a parent, a contract, a budget, a depth, a termination \
          condition, a merge destination, and a declared write scope. Nothing forces this \
          invocation — the enforcement level is statically-checked, not mediated — so the required \
-         pre-spawn validation is:\n\n\
+         flow is **transactional against the durable budget pool** (racing spawns serialize on \
+         the pool's lock and can never jointly overshoot the total):\n\n\
          ```sh\n\
-         echo \"$SPAWN_JSON\" | kernel hive-spawn --max-depth {} --budget-remaining $REMAINING\n\
+         # once, before fan-out: create the pool\n\
+         kernel hive init --store hive --hive {id} --budget {budget}\n\n\
+         # per spawn: validate AND atomically reserve the spawn's budget\n\
+         echo \"$SPAWN_JSON\" | kernel hive-spawn --max-depth {max_depth} \\\n  --store hive --hive {id} --spawn-id \"$SPAWN_ID\" --ledger {ledger}\n\n\
+         # per worker completion: record actual spend, return the remainder\n\
+         kernel hive settle --store hive --hive {id} --spawn-id \"$SPAWN_ID\" \\\n  --spent \"$TOKENS_SPENT\" --ledger {ledger}\n\
          ```\n\n\
-         Caps: budget {} · max depth {} · worker isolation {:?}.\n",
-        h.id, h.fan_out, h.worker, h.merge, h.max_depth, h.budget, h.max_depth, h.worker_isolation,
+         A failed worker settles with `--spent 0` so its whole reservation returns to the pool.\n\n\
+         Caps: budget {budget} · max depth {max_depth} · worker isolation {:?}.\n",
+        h.fan_out, h.worker, h.merge, h.worker_isolation,
+        id = h.id, budget = h.budget, max_depth = h.max_depth,
     ));
     if let Some(scope) = h.approval_scope {
         body.push_str(&format!("\nGate approval scope: **{scope:?}**.\n"));

@@ -479,6 +479,16 @@ pub fn runtime_dirs(compiled: &spec::CompiledSpec) -> Vec<String> {
     {
         dirs.push("checkpoints/".to_string());
     }
+    // An active Hive gets its durable budget-pool store: reservations must
+    // survive the orchestrator's process, or the cap is caller-claimed again.
+    if spec
+        .bindings
+        .hives
+        .iter()
+        .any(|h| g.is_active(PatternKind::Hive, &h.id))
+    {
+        dirs.push("hive/".to_string());
+    }
     dirs.sort();
     dirs.dedup();
     dirs

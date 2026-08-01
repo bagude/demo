@@ -140,13 +140,37 @@ enum Command {
         playbook_ref: Option<String>,
     },
     /// Law of the Hive: read a spawn request as JSON on stdin and allow (exit 0)
-    /// or refuse (exit 2) it against the Hive's depth and budget caps.
+    /// or refuse (exit 2) it against the Hive's caps. In pool mode
+    /// (--store/--hive/--spawn-id) the budget is RESERVED transactionally
+    /// from the durable pool, so racing spawns cannot jointly overshoot.
     HiveSpawn {
         #[arg(long)]
         max_depth: u32,
+        /// Stateless mode: caller-claimed remaining budget. Racing spawns can
+        /// jointly overshoot in this mode — prefer the pool flags.
         #[arg(long)]
-        budget_remaining: u64,
+        budget_remaining: Option<u64>,
+        /// Pool mode: directory holding <hive>.budget.json.
+        #[arg(long)]
+        store: Option<PathBuf>,
+        /// Pool mode: the Hive whose pool covers this spawn.
+        #[arg(long)]
+        hive: Option<String>,
+        /// Pool mode: reservation key (replay-safe: the same id re-reserving
+        /// the same amount is idempotent).
+        #[arg(long)]
+        spawn_id: Option<String>,
+        /// Ledger to record the spawn decision to.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
+    /// Hive budget-pool operations: create the pool, settle reservations.
+    #[command(subcommand)]
+    Hive(HiveCmd),
     /// Gate operations: request a checkpoint, approve it, or verify it.
     #[command(subcommand)]
     Gate(GateCmd),
@@ -308,6 +332,41 @@ enum LedgerCmd {
     Verify {
         #[arg(long)]
         ledger: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum HiveCmd {
+    /// Create a Hive's durable budget pool (idempotent when the total agrees;
+    /// refused when it does not — a budget is not renegotiated by
+    /// re-declaring it).
+    Init {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        hive: String,
+        #[arg(long)]
+        budget: u64,
+    },
+    /// Settle a spawn's reservation: record what was actually spent (≤
+    /// reserved) and return the remainder to the pool. --spent 0 releases a
+    /// failed or cancelled worker's reservation entirely.
+    Settle {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        hive: String,
+        #[arg(long)]
+        spawn_id: String,
+        #[arg(long)]
+        spent: u64,
+        /// Ledger to record the settlement to.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
 }
 
@@ -577,15 +636,99 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::HiveSpawn {
             max_depth,
             budget_remaining,
+            store,
+            hive,
+            spawn_id,
+            ledger,
+            run_id,
+            playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin)?;
             let req: kernel::hive::SpawnRequest = serde_json::from_str(&stdin)
                 .map_err(|e| format!("spawn request is not valid JSON: {e}"))?;
-            match kernel::hive::validate_spawn(&req, max_depth, budget_remaining) {
-                Ok(()) => {
+
+            enum Mode<'a> {
+                Stateless(u64),
+                Pool(&'a std::path::Path, &'a str, &'a str),
+            }
+            let mode = match (
+                budget_remaining,
+                store.as_deref(),
+                hive.as_deref(),
+                spawn_id.as_deref(),
+            ) {
+                (Some(m), None, None, None) => Mode::Stateless(m),
+                (None, Some(s), Some(h), Some(id)) => Mode::Pool(s, h, id),
+                _ => {
+                    return Err("pass either --budget-remaining (stateless) or all of \
+                                --store/--hive/--spawn-id (transactional pool)"
+                        .into())
+                }
+            };
+
+            let outcome: Result<String, String> = match mode {
+                Mode::Stateless(remaining) => {
+                    kernel::hive::validate_spawn(&req, max_depth, remaining)
+                        .map(|()| "caller-claimed budget (stateless mode)".to_string())
+                        .map_err(|e| e.to_string())
+                }
+                Mode::Pool(store, hive, spawn_id) => {
+                    // Field checks first; the budget cap is the POOL's call,
+                    // enforced by the atomic reservation below.
+                    kernel::hive::validate_spawn(&req, max_depth, u64::MAX)
+                        .map_err(|e| e.to_string())
+                        .and_then(|()| {
+                            kernel::hive::BudgetPool::at(store, hive)
+                                .reserve(spawn_id, req.budget)
+                                .map(|state| {
+                                    format!(
+                                        "reserved {} from pool '{hive}' ({} remaining)",
+                                        req.budget,
+                                        state.remaining()
+                                    )
+                                })
+                                .map_err(|e| e.to_string())
+                        })
+                }
+            };
+
+            // A spawn authorization is a governed decision; record it.
+            if let Some(ledger) = &ledger {
+                let mut input_refs = vec![
+                    format!("parent:{}", req.parent),
+                    format!("budget:{}", req.budget),
+                ];
+                if let Some(id) = &spawn_id {
+                    input_refs.push(format!("spawn:{id}"));
+                }
+                let event = Event {
+                    run_id: run_id.clone(),
+                    task_id: None,
+                    parent_task_id: None,
+                    action_id: "hive_spawn".into(),
+                    actor: "kernel".into(),
+                    timestamp: now_rfc3339(),
+                    transition: "hive.spawn".into(),
+                    input_refs,
+                    output_refs: vec![],
+                    decision: if outcome.is_ok() {
+                        Decision::Allowed
+                    } else {
+                        Decision::Denied
+                    },
+                    evidence_refs: vec![],
+                    playbook_ref: playbook_ref.unwrap_or_default(),
+                    kernel_ref: kernel::kernel_ref(),
+                    attempt_id: None,
+                };
+                EventLog::at(ledger).append(&event)?;
+            }
+
+            match outcome {
+                Ok(detail) => {
                     println!(
-                        "spawn authorized: parent={} depth={}",
+                        "spawn authorized: parent={} depth={} — {detail}",
                         req.parent, req.depth
                     );
                     Ok(ExitCode::SUCCESS)
@@ -596,6 +739,71 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Hive(cmd) => match cmd {
+            HiveCmd::Init {
+                store,
+                hive,
+                budget,
+            } => {
+                let state = kernel::hive::BudgetPool::at(&store, &hive).init(budget)?;
+                println!(
+                    "pool '{hive}': total {}, spent {}, reserved {}, remaining {}",
+                    state.total,
+                    state.spent,
+                    state.reserved(),
+                    state.remaining()
+                );
+                Ok(ExitCode::SUCCESS)
+            }
+            HiveCmd::Settle {
+                store,
+                hive,
+                spawn_id,
+                spent,
+                ledger,
+                run_id,
+                playbook_ref,
+            } => {
+                let result = kernel::hive::BudgetPool::at(&store, &hive).settle(&spawn_id, spent);
+                if let Some(ledger) = &ledger {
+                    // Settlement — including a refused overspend — is evidence.
+                    let event = Event {
+                        run_id: run_id.clone(),
+                        task_id: None,
+                        parent_task_id: None,
+                        action_id: "hive_settle".into(),
+                        actor: "kernel".into(),
+                        timestamp: now_rfc3339(),
+                        transition: "hive.settle".into(),
+                        input_refs: vec![format!("spawn:{spawn_id}"), format!("spent:{spent}")],
+                        output_refs: vec![],
+                        decision: if result.is_ok() {
+                            Decision::Recorded
+                        } else {
+                            Decision::Denied
+                        },
+                        evidence_refs: vec![],
+                        playbook_ref: playbook_ref.unwrap_or_default(),
+                        kernel_ref: kernel::kernel_ref(),
+                        attempt_id: None,
+                    };
+                    EventLog::at(ledger).append(&event)?;
+                }
+                match result {
+                    Ok(state) => {
+                        println!(
+                            "settled '{spawn_id}': spent {spent}, pool remaining {}",
+                            state.remaining()
+                        );
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    Err(e) => {
+                        eprintln!("settlement refused: {e}");
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
+            }
+        },
         Command::Gate(cmd) => gate(cmd),
         Command::Registry(cmd) => match cmd {
             RegistryCmd::Sign { registry, key } => {

@@ -82,7 +82,10 @@ enum Command {
     },
     /// Gate at the commit boundary: read a proposed Bash tool call on stdin and,
     /// if it is a `git commit`, block it (exit 2) while any required obligation
-    /// is still outstanding. Non-commit commands pass through.
+    /// is still outstanding. Non-commit commands pass through. Every actual
+    /// commit evaluation — allow or deny — is appended to the Ledger: a blocked
+    /// commit is a governed decision, and an unrecorded governed decision is a
+    /// hole in the evidence.
     PreCommit {
         #[arg(long)]
         ledger: PathBuf,
@@ -91,6 +94,9 @@ enum Command {
         /// The run whose obligations are evaluated (obligations are per-run).
         #[arg(long, default_value = "unknown")]
         run_id: String,
+        /// The Playbook (compiled interpretation) digest governing this run.
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
     /// Discharge an obligation: optionally run a check command, and on success
     /// append a discharge event so a Gate that requires it can proceed.
@@ -306,7 +312,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs: vec![],
-                playbook_ref,
+                playbook_ref: playbook_ref.unwrap_or_default(),
                 kernel_ref: kernel::kernel_ref(),
                 attempt_id: None,
             };
@@ -317,16 +323,45 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             require,
             run_id,
+            playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
-            // Only a git commit is gated here; everything else passes.
+            // Only a git commit is gated here; everything else passes through
+            // ungated — and unrecorded, since no gate decision was made.
             if !is_git_commit(&stdin) {
                 return Ok(ExitCode::SUCCESS);
             }
             let events = EventLog::at(&ledger).read_all().unwrap_or_default();
             let outstanding = kernel::obligation::outstanding(&events, &require, &run_id);
-            if outstanding.is_empty() {
+            let allowed = outstanding.is_empty();
+            // The decision is evidence either way: which obligations stood in
+            // the way of a denial is exactly what an audit needs to see.
+            let event = Event {
+                run_id: run_id.clone(),
+                task_id: None,
+                parent_task_id: None,
+                action_id: "pre_commit".into(),
+                actor: "kernel".into(),
+                timestamp: now_rfc3339(),
+                transition: "gate.pre_commit".into(),
+                input_refs: outstanding
+                    .iter()
+                    .map(|o| format!("obligation:{o}"))
+                    .collect(),
+                output_refs: vec![],
+                decision: if allowed {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                evidence_refs: vec![],
+                playbook_ref: playbook_ref.unwrap_or_default(),
+                kernel_ref: kernel::kernel_ref(),
+                attempt_id: None,
+            };
+            EventLog::at(&ledger).append(&event)?;
+            if allowed {
                 Ok(ExitCode::SUCCESS)
             } else {
                 eprintln!(
@@ -371,7 +406,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs,
-                playbook_ref,
+                playbook_ref: playbook_ref.unwrap_or_default(),
                 kernel_ref: kernel::kernel_ref(),
                 attempt_id: None,
             };
@@ -427,7 +462,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: decision.into(),
                 evidence_refs,
-                playbook_ref,
+                playbook_ref: playbook_ref.unwrap_or_default(),
                 kernel_ref: kernel::kernel_ref(),
                 attempt_id,
             };
@@ -477,7 +512,7 @@ fn pre_tool(
             output_refs: vec![],
             decision,
             evidence_refs: vec![],
-            playbook_ref,
+            playbook_ref: playbook_ref.unwrap_or_default(),
             kernel_ref: kernel::kernel_ref(),
             attempt_id: None,
         };
@@ -540,7 +575,7 @@ fn pre_bash(
                 Decision::Denied
             },
             evidence_refs: vec![],
-            playbook_ref,
+            playbook_ref: playbook_ref.unwrap_or_default(),
             kernel_ref: kernel::kernel_ref(),
             attempt_id: None,
         };

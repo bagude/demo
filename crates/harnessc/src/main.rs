@@ -125,18 +125,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             };
             let refs = common::refs(&compiled, &hash, backend.platform());
             let generated = backend.generate(&compiled, &refs);
-            let mut stale = Vec::new();
-            for file in &generated.files {
-                let path = out.join(&file.path);
-                match std::fs::read_to_string(&path) {
-                    Err(_) => stale.push(format!("missing:  {}", file.path)),
-                    Ok(on_disk) if on_disk != file.content => {
-                        stale.push(format!("differs:  {}", file.path))
-                    }
-                    Ok(_) => {}
-                }
-            }
-            if stale.is_empty() {
+            let problems = verify_bundle(&generated, &out);
+            if problems.is_empty() {
                 println!(
                     "fresh: {} generated file(s) match playbook {}",
                     generated.files.len(),
@@ -148,8 +138,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     "stale: the generated tree does not match this compiler (playbook {})",
                     refs.playbook_ref
                 );
-                for s in &stale {
-                    eprintln!("  {s}");
+                for p in &problems {
+                    eprintln!("  {p}");
                 }
                 eprintln!("run `harnessc build --out {}` to regenerate", out.display());
                 Ok(ExitCode::FAILURE)
@@ -185,22 +175,226 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 refs.ir_ref,
                 refs.playbook_ref,
             );
-            for file in &generated.files {
-                let target_path = out.join(&file.path);
-                if dry_run {
-                    println!("  would write {}", target_path.display());
-                    continue;
+
+            // The previous build's manifest names the paths it managed;
+            // whatever fell out of the generated set since then is retired
+            // during promotion, so a hook or command this compiler no longer
+            // emits does not remain live behavior in the harness.
+            let expected: std::collections::BTreeSet<&str> =
+                generated.files.iter().map(|f| f.path.as_str()).collect();
+            let obsolete: Vec<String> = bundle_manifest_file(&generated)
+                .and_then(|m| common::read_manifest_paths(&out.join(&m.path)))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| !expected.contains(p.as_str()))
+                .filter(|p| is_safe_bundle_path(p))
+                .filter(|p| out.join(p).symlink_metadata().is_ok())
+                .collect();
+
+            if dry_run {
+                for file in &generated.files {
+                    println!("  would write {}", out.join(&file.path).display());
                 }
-                if let Some(parent) = target_path.parent() {
-                    std::fs::create_dir_all(parent)?;
+                for p in &obsolete {
+                    println!("  would remove {}", out.join(p).display());
                 }
-                std::fs::write(&target_path, &file.content)?;
-                make_executable_if_hook(&target_path)?;
-                println!("  wrote {}", target_path.display());
+                return Ok(ExitCode::SUCCESS);
             }
+
+            promote_bundle(&generated, &out, &obsolete)?;
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// The bundle manifest within a generated set (the backend appends it last).
+fn bundle_manifest_file(generated: &common::Generated) -> Option<&common::GenFile> {
+    generated
+        .files
+        .iter()
+        .find(|f| f.path.ends_with(common::BUNDLE_MANIFEST_FILENAME))
+}
+
+/// Prove the tree at `out` is exactly this bundle. Byte comparison of the
+/// expected files proves each present file is right; it cannot see a stale
+/// artifact an older compiler emitted, a hook whose executable bit was
+/// stripped (which silently stops running), or a path replaced by a symlink.
+/// Each of those is a behavioral divergence, so each is a verification
+/// failure: path set, bytes, type, and mode are all part of the proof.
+fn verify_bundle(generated: &common::Generated, out: &Path) -> Vec<String> {
+    let mut problems = Vec::new();
+    let expected: std::collections::BTreeSet<&str> =
+        generated.files.iter().map(|f| f.path.as_str()).collect();
+
+    // Obsolete detection: the previous build's manifest records the path set
+    // it managed. Anything it lists that this compiler no longer generates —
+    // but still exists on disk — is live behavior no current Playbook
+    // accounts for.
+    if let Some(manifest) = bundle_manifest_file(generated) {
+        if let Some(old_paths) = common::read_manifest_paths(&out.join(&manifest.path)) {
+            for p in old_paths {
+                if !expected.contains(p.as_str())
+                    && is_safe_bundle_path(&p)
+                    && out.join(&p).symlink_metadata().is_ok()
+                {
+                    problems.push(format!(
+                        "obsolete: {p} (formerly generated; not part of this Playbook)"
+                    ));
+                }
+            }
+        }
+    }
+
+    for file in &generated.files {
+        let path = out.join(&file.path);
+        let md = match std::fs::symlink_metadata(&path) {
+            Err(_) => {
+                problems.push(format!("missing:  {}", file.path));
+                continue;
+            }
+            Ok(md) => md,
+        };
+        if !md.file_type().is_file() {
+            problems.push(format!("type:     {} is not a regular file", file.path));
+            continue;
+        }
+        match std::fs::read(&path) {
+            Err(e) => problems.push(format!("unreadable: {} ({e})", file.path)),
+            Ok(bytes) if bytes != file.content.as_bytes() => {
+                problems.push(format!("differs:  {}", file.path))
+            }
+            Ok(_) => {}
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let is_exec = md.permissions().mode() & 0o111 != 0;
+            let want_exec = common::file_mode(&file.path) == "0755";
+            if is_exec != want_exec {
+                problems.push(format!(
+                    "mode:     {} is {}executable but must be mode {}",
+                    file.path,
+                    if is_exec { "" } else { "not " },
+                    common::file_mode(&file.path)
+                ));
+            }
+        }
+    }
+    problems
+}
+
+/// Write the bundle without ever presenting a torn Playbook as current:
+///
+/// 1. **Stage** every file as a `.harnessc-tmp` sibling with its final mode,
+///    fsynced — the live tree is untouched until the whole bundle exists on
+///    disk.
+/// 2. **Promote** everything except the manifest by atomic rename.
+/// 3. **Retire** obsolete files (in the previous manifest, absent from this
+///    set) — before the manifest stops listing them, so an interrupted
+///    cleanup is still visible to `verify` through the old manifest.
+/// 4. **Promote the manifest last** — the commit point at which the tree
+///    describes itself as the new bundle.
+///
+/// Crash windows: during (1) the old bundle is fully intact (only tmp litter
+/// remains, overwritten by the next build); during (2)–(4) the tree can be
+/// mixed, but the not-yet-replaced manifest still describes the OLD set, so
+/// `harnessc verify` reports the exact divergence instead of trusting either
+/// version. At no point is a half-written file at a live path.
+fn promote_bundle(
+    generated: &common::Generated,
+    out: &Path,
+    obsolete: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Stage the complete bundle first; on any failure, unstage and abort with
+    // the live tree untouched.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for file in &generated.files {
+        let target = out.join(&file.path);
+        match stage_file(&target, &file.content, common::file_mode(&file.path)) {
+            Ok(tmp) => staged.push((tmp, target)),
+            Err(e) => {
+                for (tmp, _) in &staged {
+                    let _ = std::fs::remove_file(tmp);
+                }
+                return Err(format!("staging {}: {e}", file.path).into());
+            }
+        }
+    }
+
+    // The manifest is generated last, so it is the last staged pair.
+    let Some(((manifest_tmp, manifest_target), files)) = staged.split_last() else {
+        return Ok(());
+    };
+    for (tmp, target) in files {
+        std::fs::rename(tmp, target).map_err(|e| format!("promoting {}: {e}", target.display()))?;
+        fsync_dir(target.parent());
+        println!("  wrote {}", target.display());
+    }
+    for p in obsolete {
+        let target = out.join(p);
+        match std::fs::remove_file(&target) {
+            Ok(()) => println!("  removed {} (no longer generated)", target.display()),
+            Err(e) => eprintln!(
+                "warning: could not remove obsolete {}: {e}",
+                target.display()
+            ),
+        }
+    }
+    std::fs::rename(manifest_tmp, manifest_target)
+        .map_err(|e| format!("promoting {}: {e}", manifest_target.display()))?;
+    fsync_dir(manifest_target.parent());
+    println!("  wrote {}", manifest_target.display());
+    Ok(())
+}
+
+/// Stage `content` for `target` as a `.harnessc-tmp` sibling: full bytes,
+/// final mode, fsynced — ready to be atomically renamed into place.
+fn stage_file(target: &Path, content: &str, mode: &str) -> std::io::Result<PathBuf> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut name = target.file_name().unwrap_or_default().to_os_string();
+    name.push(".harnessc-tmp");
+    let tmp = target.with_file_name(name);
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bits = if mode == "0755" { 0o755 } else { 0o644 };
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(bits))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    Ok(tmp)
+}
+
+/// Durably record a rename by fsyncing the containing directory (Unix; other
+/// platforms lack the primitive).
+fn fsync_dir(dir: Option<&Path>) {
+    #[cfg(unix)]
+    if let Some(dir) = dir {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// A previously-managed path is touchable only if it is relative and contains
+/// no traversal: the manifest is data, and `build` must not be steerable into
+/// deleting outside the output tree by a doctored one.
+fn is_safe_bundle_path(p: &str) -> bool {
+    use std::path::Component;
+    !p.is_empty()
+        && Path::new(p)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// Choose a back-end from an explicit `--target` or the spec's `platform.type`.
@@ -233,20 +427,6 @@ fn read_spec(path: &Path) -> Result<(String, String), Box<dyn std::error::Error>
     }
     let text = String::from_utf8(bytes)?;
     Ok((text, hash))
-}
-
-fn make_executable_if_hook(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if path.extension().and_then(|e| e.to_str()) == Some("sh") {
-            let mut perms = std::fs::metadata(path)?.permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(path, perms)?;
-        }
-    }
-    let _ = path;
-    Ok(())
 }
 
 fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {

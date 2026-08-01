@@ -67,9 +67,12 @@ pub struct Event {
     /// This is the *compiled interpretation* digest (source + compiler + IR +
     /// target), not merely the spec bytes, so the log proves which constitutional
     /// version was in force for each event: essential for overnight Gates and
-    /// historical replay.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub playbook_ref: Option<String>,
+    /// historical replay. Mandatory on every governed event this kernel writes
+    /// (the generated hooks bake the digest in); an empty value is explicit
+    /// historical/foreign state — a record written before run binding existed,
+    /// or outside a compiled harness — never an ordinary governed event.
+    #[serde(default)]
+    pub playbook_ref: String,
     /// Content digest of the kernel implementation that *executed* this
     /// transition. A compiled harness identity (`playbook_ref`) is not a runtime
     /// identity: the same Playbook enforced by a different kernel binary is a
@@ -83,14 +86,6 @@ pub struct Event {
     /// for replay safety across retries and resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt_id: Option<String>,
-}
-
-impl Event {
-    /// Set the run-binding digest (fluent; used by the CLI after construction).
-    pub fn with_playbook_ref(mut self, playbook_ref: Option<String>) -> Self {
-        self.playbook_ref = playbook_ref;
-        self
-    }
 }
 
 /// A handle to an append-only event log file (JSON lines).
@@ -167,7 +162,7 @@ mod tests {
             output_refs: vec![],
             decision,
             evidence_refs: vec![],
-            playbook_ref: Some("sha256:spec".into()),
+            playbook_ref: "sha256:spec".into(),
             kernel_ref: "sha256:kernel".into(),
             attempt_id: None,
         }
@@ -190,7 +185,7 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"playbook_ref\":\"sha256:spec\""));
         let back: Event = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.playbook_ref.as_deref(), Some("sha256:spec"));
+        assert_eq!(back.playbook_ref, "sha256:spec");
     }
 
     #[test]
@@ -205,12 +200,15 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_record_without_kernel_ref_reads_as_explicit_empty() {
-        // Absence is explicit historical state (a record this kernel did not
-        // write), not a deserialization failure — the field defaults to empty.
+    fn a_legacy_record_without_run_binding_reads_as_explicit_empty() {
+        // Absence is explicit historical state (a record written before run
+        // binding existed, or by a foreign writer), not a deserialization
+        // failure — both identity fields default to empty rather than hiding
+        // behind an Option that reads like an ordinary governed event.
         let legacy = r#"{"run_id":"r","action_id":"a","actor":"kernel","timestamp":"t","transition":"pre_tool.edit","decision":"allowed"}"#;
         let back: Event = serde_json::from_str(legacy).unwrap();
         assert!(back.kernel_ref.is_empty());
+        assert!(back.playbook_ref.is_empty());
     }
 
     #[test]

@@ -301,6 +301,70 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// File name of the bundle manifest — the exact inventory every backend appends
+/// as the **final** file of its generated set. Backends choose the directory
+/// (`harness/` for claude-code, the bundle root for portable); the name is
+/// shared so the driver can locate the previous build's manifest for obsolete-
+/// file detection without knowing the backend's layout.
+pub const BUNDLE_MANIFEST_FILENAME: &str = "bundle.manifest.json";
+
+/// The mode a generated file is promoted with, and the mode `verify` holds it
+/// to. Shell hooks are executable; everything else is not. A hook whose bytes
+/// match but whose executable bit was stripped is a *behavioral* change — the
+/// hook silently stops running — so mode is part of the bundle's identity, not
+/// a filesystem detail.
+pub fn file_mode(path: &str) -> &'static str {
+    if path.ends_with(".sh") {
+        "0755"
+    } else {
+        "0644"
+    }
+}
+
+/// Build the bundle manifest over every file generated **before** it: path,
+/// content digest, mode, and file type, sorted by path.
+///
+/// Byte comparison of the expected set proves each present file is right; it
+/// cannot prove nothing else is left over. A file an *older* compiler emitted
+/// and the current one no longer does — a stale hook, a retired command —
+/// passes a files-I-expect scan untouched, while still being live behavior in
+/// the harness. The manifest closes that hole: it is the durable record of the
+/// managed path set, so `build` can delete what fell out of the set and
+/// `verify` can flag it. The manifest cannot list its own digest; it is
+/// instead compared byte-for-byte like any other generated file.
+pub fn bundle_manifest(prov: &Prov, path: &str, files: &[GenFile]) -> GenFile {
+    let mut entries: Vec<&GenFile> = files.iter().collect();
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let files_json: Vec<Value> = entries
+        .iter()
+        .map(|f| {
+            json!({
+                "path": f.path,
+                "digest": sha256_hex(f.content.as_bytes()),
+                "mode": file_mode(&f.path),
+                "type": "regular",
+            })
+        })
+        .collect();
+    prov.json_file(path, json!({ "files": files_json }))
+}
+
+/// The managed path set recorded by a previous build's manifest on disk, or
+/// `None` when no (parseable) manifest exists — e.g. the first build into a
+/// directory. Tolerant parsing is deliberate: a corrupt manifest must not
+/// brick `build`, and `verify` catches the corruption as a byte mismatch.
+pub fn read_manifest_paths(manifest_path: &std::path::Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(manifest_path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    Some(
+        v.get("files")?
+            .as_array()?
+            .iter()
+            .filter_map(|f| f.get("path")?.as_str().map(String::from))
+            .collect(),
+    )
+}
+
 /// The pattern kinds of the compiled architecture with their enforcement
 /// levels, derived from the **resolved graph** rather than from surface
 /// presence: a Law activated only through a `uses` edge or `always_on` is part
@@ -331,18 +395,39 @@ pub fn ensure_trailing_slash(s: &str) -> String {
     }
 }
 
-/// The runtime directories a harness needs, derived from its bindings.
-pub fn runtime_dirs(spec: &spec::SpecFile) -> Vec<String> {
+/// The runtime directories a harness needs, derived from the **active
+/// components** of the resolved graph. A binding the composition never
+/// activates gets no runtime directory: membership in the compiled
+/// architecture is the graph's call, never inferred from raw binding presence.
+pub fn runtime_dirs(compiled: &spec::CompiledSpec) -> Vec<String> {
+    use spec::PatternKind;
+    let spec = &compiled.spec;
+    let g = &compiled.graph;
     let mut dirs = Vec::new();
-    if let Some(intake) = &spec.bindings.intake {
+    if let Some(intake) = spec
+        .bindings
+        .intake
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Intake))
+    {
         dirs.push(ensure_trailing_slash(&intake.storage));
     }
-    if let Some(ledger) = &spec.bindings.ledger {
+    if let Some(ledger) = spec
+        .bindings
+        .ledger
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Ledger))
+    {
         if let Some((dir, _)) = ledger.destination.rsplit_once('/') {
             dirs.push(format!("{dir}/"));
         }
     }
-    if spec.bindings.gate.is_some() {
+    if spec
+        .bindings
+        .gate
+        .as_ref()
+        .is_some_and(|gate| g.is_active(PatternKind::Gate, &gate.id))
+    {
         dirs.push("checkpoints/".to_string());
     }
     dirs.sort();
@@ -442,7 +527,7 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "kernel_ref"],
+        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
         "properties": {
             "run_id": { "type": "string" },
             "task_id": { "type": "string" },
@@ -462,16 +547,37 @@ pub fn event_schema() -> Value {
     })
 }
 
-/// The three kernel schemas at the paths the spec names for them.
-pub fn schema_files(prov: &Prov, spec: &spec::SpecFile) -> Vec<GenFile> {
+/// The kernel schemas at the paths the spec names for them — emitted only for
+/// components the resolved graph activates. An Intake that is bound but never
+/// enters the composition is not part of the compiled architecture, so its
+/// schema is not part of the Playbook.
+pub fn schema_files(prov: &Prov, compiled: &spec::CompiledSpec) -> Vec<GenFile> {
+    use spec::PatternKind;
+    let spec = &compiled.spec;
+    let g = &compiled.graph;
     let mut out = Vec::new();
-    if let Some(intake) = &spec.bindings.intake {
+    if let Some(intake) = spec
+        .bindings
+        .intake
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Intake))
+    {
         out.push(prov.json_file(&intake.task_schema, task_packet_schema()));
     }
-    if let Some(gate) = &spec.bindings.gate {
+    if let Some(gate) = spec
+        .bindings
+        .gate
+        .as_ref()
+        .filter(|gate| g.is_active(PatternKind::Gate, &gate.id))
+    {
         out.push(prov.json_file(&gate.checkpoint_schema, checkpoint_schema()));
     }
-    if let Some(ledger) = &spec.bindings.ledger {
+    if let Some(ledger) = spec
+        .bindings
+        .ledger
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Ledger))
+    {
         out.push(prov.json_file(&ledger.event_schema, event_schema()));
     }
     out
@@ -521,9 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn event_schema_requires_the_runtime_kernel_identity() {
-        // A governed event must carry which kernel executed it; the schema makes
-        // that mandatory rather than conventional.
+    fn event_schema_requires_both_run_binding_identities() {
+        // A governed event must carry which Playbook governed it AND which
+        // kernel executed it; the schema makes both mandatory rather than
+        // conventional. (Legacy records carry explicit empty strings.)
         let schema = event_schema();
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -531,6 +638,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
+        assert!(required.contains(&"playbook_ref"));
         assert!(required.contains(&"kernel_ref"));
     }
 }

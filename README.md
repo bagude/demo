@@ -128,10 +128,24 @@ spec governed and which kernel ran.
 ./target/debug/harnessc verify
 ```
 
-`harnessc verify` compiles in memory and compares every expected file against
-the tree on disk, naming what is missing or differs. A workspace test runs it
-against this repository's own Playbook, so a stale artifact fails CI instead of
-shipping.
+`harnessc verify` compiles in memory and proves the tree on disk is **exactly**
+this bundle — not merely that every expected file matches. Each backend's final
+artifact is a **bundle manifest** (path, content digest, mode, and file type
+per generated file, sorted), which makes the managed path set durable. Verify
+checks four things per file — presence, bytes, regular-file type (a symlink in
+an artifact's place fails), and mode (a hook whose executable bit was stripped
+silently stops running, so identical bytes are not enough) — and, via the
+previous manifest, flags **obsolete** files: paths an older compiler emitted
+that this one no longer generates, which would otherwise remain live behavior
+no current Playbook accounts for. A workspace test runs it against this
+repository's own Playbook, so a stale artifact fails CI instead of shipping.
+
+`harnessc build` promotes the bundle without ever presenting a torn Playbook:
+the complete bundle is staged as fsynced tmp siblings first (the live tree
+untouched), then promoted by atomic renames; obsolete files are retired before
+the manifest is replaced, and the manifest is promoted **last** as the commit
+point. A crash mid-promotion leaves the old manifest describing the old set, so
+`verify` reports the exact divergence rather than trusting either version.
 
 ## What the compiler rejects (the interesting part)
 
@@ -351,8 +365,10 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   compiled-interpretation digest that governed the run), so the log proves which
   constitutional version was in force. The generated hooks bake in the digest they
   compiled from. Each event additionally carries `kernel_ref`, the digest of the
-  enforcement binary that executed it — mandatory in the event schema — so the
-  record distinguishes which kernel ran, not just which spec governed.
+  enforcement binary that executed it. Both fields are **mandatory** — on the
+  event type and in the generated schema — so the record distinguishes which
+  kernel ran, not just which spec governed; an empty value is explicit legacy
+  state, never an ordinary governed event.
 - **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
   bind approval to an action hash + precondition snapshot + approver + expiry,
   and **revalidate at resume**: a changed action, drifted precondition, or
@@ -361,7 +377,10 @@ The generated hooks are thin shims; the enforcement lives in the compiled
 - **`require-validation`** (Obligation Law) — an obligation event is recorded
   after each edit, and the commit gate hook **blocks `git commit`** (exit 2)
   while it is outstanding. `kernel validate` discharges it (optionally gated on a
-  check command as evidence). This is "recorded" turned into "enforced".
+  check command as evidence). This is "recorded" turned into "enforced". Every
+  actual commit evaluation — allow or deny — is itself appended to the Ledger,
+  run-bound, with a denial naming the obligations that stood in the way: a
+  blocked commit is a governed decision, not just an exit code.
 - **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
   bind approval to an action hash + precondition snapshot + approver + expiry,
   and **revalidate at resume**: a changed action, drifted precondition, expired

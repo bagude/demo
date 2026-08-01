@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GENERATED FROM: harness.patterns.yaml
 # SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
-# PLAYBOOK: sha256:6d10575aa618ceaf8a3f81212dfaa9765e0ca68114d49d26ac17efa5cd46a979
+# PLAYBOOK: sha256:f394538e7ede906cdfd440ae75bf0f6eaf62bdc06b75c1c30f905ef6472ba380
 # GENERATOR: harnessc 0.1.0
 # DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 # Self-protection: block `rm`/`mv`/redirect against enforcement artifacts.
@@ -11,4 +11,4 @@ exec "${KERNEL_BIN:-kernel}" pre-bash \
   --protected "harness/enforcement.protected" \
   --ledger "evidence/events.jsonl" \
   --run-id "${CLAUDE_SESSION_ID:-unknown}" \
-  --playbook-ref "sha256:6d10575aa618ceaf8a3f81212dfaa9765e0ca68114d49d26ac17efa5cd46a979"
+  --playbook-ref "sha256:f394538e7ede906cdfd440ae75bf0f6eaf62bdc06b75c1c30f905ef6472ba380"

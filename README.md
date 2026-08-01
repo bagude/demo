@@ -487,7 +487,17 @@ alternate-data-stream vectors all rejected); checkpoints are written with the
 POSIX atomic-replace sequence (temp → fsync → rename → dir-fsync, with the
 directory fsync on Unix) and hashed, injection-safe names, and the Ledger is
 fsynced; and approver identity distinguishes a *claimed* label from an
-authenticated principal.
+authenticated principal — where `signature` auth is **cryptographically real**:
+`kernel key generate` mints an Ed25519 approver keypair, `gate sign` signs the
+canonical approval message (gate, run, action hash, precondition snapshot,
+anchored ledger head, expiry), `gate approve --auth signature` verifies against
+the trusted-keys registry *before recording anything*, and `gate verify
+--trusted-keys` **re-verifies the stored signature at resume**. That last step
+is the custody boundary moving from disk to key: a party who rewrites the
+ledger and repoints the checkpoint's anchored head produces an internally
+valid chain that file-level checks accept — but the approver signed the head
+they actually saw, so the rewrite invalidates the approval. Forging a
+resumable approval now requires the approver's private key, not write access.
 
 Documented follow-ups (not yet done). The graph IR drives activation,
 generation, **and the relational case law**; binding dependencies are
@@ -520,6 +530,8 @@ instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
 **transactional Hive budget** reservations; **symlink/canonical and case/Unicode-alias**
-resolution for existing write targets; a real **IdP/signature** integration for
-approvals; a **Python/OpenAI-Agents** back-end behind the same `Binding`; and
+resolution for existing write targets; a real **IdP** integration binding
+approver keys to organizational identity (the signature layer exists; key
+distribution and revocation remain host configuration); a
+**Python/OpenAI-Agents** back-end behind the same `Binding`; and
 version-promotion tooling for approved Refinery proposals.

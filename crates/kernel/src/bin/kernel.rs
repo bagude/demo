@@ -76,6 +76,14 @@ enum Command {
         /// The obligation being recorded.
         #[arg(long, default_value = "require-validation")]
         obligation: String,
+        /// The declared scope the debt lives at (run | task | branch |
+        /// workspace | action). The event records the key that scope reads.
+        #[arg(long, default_value = "run")]
+        scope: String,
+        /// Active task packet — required for task scope, whose key is the
+        /// packet's content digest.
+        #[arg(long)]
+        packet: Option<PathBuf>,
         /// The Playbook (spec) content digest governing this run.
         #[arg(long)]
         playbook_ref: Option<String>,
@@ -89,11 +97,16 @@ enum Command {
     PreCommit {
         #[arg(long)]
         ledger: PathBuf,
+        /// Required obligations, each `id` (run scope) or `id:scope` as the
+        /// compiled Playbook declares them.
         #[arg(long = "require")]
         require: Vec<String>,
-        /// The run whose obligations are evaluated (obligations are per-run).
+        /// The run whose obligations are evaluated.
         #[arg(long, default_value = "unknown")]
         run_id: String,
+        /// Active task packet, so task-scoped obligations can be keyed.
+        #[arg(long)]
+        packet: Option<PathBuf>,
         /// The Playbook (compiled interpretation) digest governing this run.
         #[arg(long)]
         playbook_ref: Option<String>,
@@ -107,6 +120,17 @@ enum Command {
         run_id: String,
         #[arg(long, default_value = "require-validation")]
         obligation: String,
+        /// The declared scope being discharged — the event must carry the same
+        /// key the open events did, or it clears nothing.
+        #[arg(long, default_value = "run")]
+        scope: String,
+        /// Active task packet (task scope key).
+        #[arg(long)]
+        packet: Option<PathBuf>,
+        /// The path being validated — required for action scope, where every
+        /// edited path owes its own discharge.
+        #[arg(long)]
+        path: Option<String>,
         /// Shell command whose success is the evidence of discharge (e.g.
         /// "cargo test"). If it fails, nothing is discharged.
         #[arg(long)]
@@ -256,6 +280,10 @@ enum GateCmd {
         /// checkpoint declares any required obligations.
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Active task packet, so task-scoped required obligations can be
+        /// keyed at resume.
+        #[arg(long)]
+        packet: Option<PathBuf>,
         /// Trusted-keys registry. Required when the stored approval claims
         /// `signature` auth: the signature is re-verified at resume, so a
         /// rewritten checkpoint fails no matter what the file claims.
@@ -399,20 +427,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             run_id,
             obligation,
+            scope,
+            packet,
             playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
             let path = extract_target_path(&stdin);
+            // The event carries the key its declared scope reads at eval time.
+            let (task_id, scope_refs) = scope_recording(&scope, packet.as_deref())?;
+            let mut input_refs: Vec<String> =
+                path.map(|p| format!("path:{p}")).into_iter().collect();
+            input_refs.extend(scope_refs);
             let event = Event {
                 run_id,
-                task_id: None,
+                task_id,
                 parent_task_id: None,
                 action_id: "post_tool".into(),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: format!("post_tool.obligation.{obligation}"),
-                input_refs: path.map(|p| format!("path:{p}")).into_iter().collect(),
+                input_refs,
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs: vec![],
@@ -427,6 +462,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             require,
             run_id,
+            packet,
             playbook_ref,
         } => {
             let mut stdin = String::new();
@@ -437,7 +473,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 return Ok(ExitCode::SUCCESS);
             }
             let events = EventLog::at(&ledger).read_all().unwrap_or_default();
-            let outstanding = kernel::obligation::outstanding(&events, &require, &run_id);
+            let ctx = kernel::obligation::ScopeContext {
+                run_id: run_id.clone(),
+                task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
+                branch: current_branch(),
+            };
+            let outstanding = kernel::obligation::outstanding(&events, &require, &ctx);
             let allowed = outstanding.is_empty();
             // The decision is evidence either way: which obligations stood in
             // the way of a denial is exactly what an audit needs to see.
@@ -480,9 +521,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             run_id,
             obligation,
+            scope,
+            packet,
+            path,
             check,
             playbook_ref,
         } => {
+            if scope == "action" && path.is_none() {
+                return Err(
+                    "action-scoped obligations discharge per path; pass --path <edited-file>"
+                        .into(),
+                );
+            }
             if let Some(cmd) = &check {
                 let status = std::process::Command::new("sh")
                     .arg("-c")
@@ -493,6 +543,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     return Ok(ExitCode::FAILURE);
                 }
             }
+            // The discharge must carry the same key the open events did, or
+            // it clears nothing.
+            let (task_id, scope_refs) = scope_recording(&scope, packet.as_deref())?;
+            let mut input_refs: Vec<String> =
+                path.map(|p| format!("path:{p}")).into_iter().collect();
+            input_refs.extend(scope_refs);
             let evidence_refs = check
                 .as_ref()
                 .map(|c| format!("check:{c}"))
@@ -500,13 +556,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .collect();
             let event = Event {
                 run_id,
-                task_id: None,
+                task_id,
                 parent_task_id: None,
                 action_id: "validate".into(),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: kernel::obligation::discharge_transition(&obligation),
-                input_refs: vec![],
+                input_refs,
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs,
@@ -966,6 +1022,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             action_hash,
             preconditions,
             ledger,
+            packet,
             trusted_keys,
             authority,
         } => {
@@ -986,8 +1043,13 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     );
                 };
                 let events = EventLog::at(ledger).read_all()?;
+                let ctx = kernel::obligation::ScopeContext {
+                    run_id: cp.run_id.clone(),
+                    task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
+                    branch: current_branch(),
+                };
                 let outstanding =
-                    kernel::obligation::outstanding(&events, &cp.requires_obligations, &cp.run_id);
+                    kernel::obligation::outstanding(&events, &cp.requires_obligations, &ctx);
                 if let Err(e) = cp.check_obligations(&outstanding) {
                     eprintln!("gate refused: {e}");
                     return Ok(ExitCode::FAILURE);
@@ -1061,6 +1123,51 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("approval valid");
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// The current git branch, when one can be determined — the key branch-scoped
+/// obligations live at. `None` (detached HEAD, not a repo, no git) makes the
+/// fail-safe rule apply: unprovable debts block.
+fn current_branch() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD")
+}
+
+/// The scope-relevant identity an obligation event must carry: the task key
+/// (packet content digest) and/or branch ref, per the declared scope. Returns
+/// (task_id, extra input_refs). Task scope without a packet is an error — the
+/// key cannot be invented, and an unkeyed event would block everyone.
+fn scope_recording(
+    scope: &str,
+    packet: Option<&std::path::Path>,
+) -> Result<(Option<String>, Vec<String>), Box<dyn std::error::Error>> {
+    let scope = kernel::obligation::Scope::parse(scope)
+        .ok_or_else(|| format!("unknown obligation scope '{scope}'"))?;
+    match scope {
+        kernel::obligation::Scope::Task => {
+            let packet =
+                packet.ok_or("task-scoped obligations need --packet to derive the task key")?;
+            Ok((Some(hash_file(packet)?), vec![]))
+        }
+        kernel::obligation::Scope::Branch => {
+            // Record what we can determine; an unknown branch records nothing
+            // and the unkeyed debt blocks everyone — fail-safe, not silent.
+            Ok((
+                None,
+                current_branch()
+                    .map(|b| format!("branch:{b}"))
+                    .into_iter()
+                    .collect(),
+            ))
+        }
+        _ => Ok((None, vec![])),
     }
 }
 

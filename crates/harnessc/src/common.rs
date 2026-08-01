@@ -406,6 +406,36 @@ pub fn pattern_inventory(compiled: &spec::CompiledSpec, binding: &dyn spec::Bind
         .collect()
 }
 
+/// The active Gate's required obligations in the form the kernel consumes:
+/// `id:scope`, with the scope read from each obligation Law's declaration.
+/// The encoding is explicit even for the default (`:run`) so a generated
+/// artifact never depends on a runtime default staying what it was.
+pub fn encoded_gate_requirements(compiled: &spec::CompiledSpec) -> Vec<String> {
+    let Some(gate) = compiled
+        .spec
+        .bindings
+        .gate
+        .as_ref()
+        .filter(|g| compiled.graph.is_active(spec::PatternKind::Gate, &g.id))
+    else {
+        return Vec::new();
+    };
+    gate.requires_obligations
+        .iter()
+        .map(|id| {
+            let scope = compiled
+                .spec
+                .bindings
+                .laws
+                .iter()
+                .find(|l| &l.id == id)
+                .map(|l| l.scope)
+                .unwrap_or_default();
+            format!("{id}:{}", scope.as_str())
+        })
+        .collect()
+}
+
 pub fn ensure_trailing_slash(s: &str) -> String {
     if s.ends_with('/') {
         s.to_string()

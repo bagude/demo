@@ -485,7 +485,13 @@ from the system; **generation consumes the active set** — a binding the
 composition never activates produces no artifact, visibly; the operator grammar
 has a **formal precedence** (`+` loosest); the direction-reversing `governs`
 relation was removed in favor of `flow_connected` / `runs_under`; obligations
-are scoped per run; file authority is decided on **platform-independent**
+live at a **declared scope** (`run | task | branch | workspace | action`,
+default `run`): the spec says whose debt an edit opens and what discharges it
+— per run, following the task packet across runs (keyed by packet digest),
+following the git branch, globally, or per edited path — with a stated
+fail-safe (a debt that cannot be proven discharged for the asking context
+blocks, including unkeyed legacy records); file authority is decided on
+**platform-independent**
 normalized components (absolute, `..`, backslash, drive-letter and
 alternate-data-stream vectors all rejected) and judged against the
 **canonical target** on the real filesystem — symlinks in the existing
@@ -553,7 +559,6 @@ worker-scoped obligations — which is also what would let one position carry a
 replication multiplicity instead of the compiler refusing the ambiguity. Beyond it: a
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
-**declared obligation scope** (`run | task | branch | workspace | action`); a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
 **transactional Hive budget** reservations; an **online IdP protocol adapter**
 (OIDC issuance, directory sync) binding the identity authority itself to

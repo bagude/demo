@@ -45,8 +45,10 @@ decision is appended to an event log (Ledger). More compositions live in
 ## What the kernel actually enforces
 
 - **File scope** — edits outside the active task packet's declared write scope
-  are blocked, not discouraged. Enforcement artifacts are self-protected:
-  amending them requires an explicit, auditable grant.
+  are blocked, not discouraged — and judged against the **canonical** target:
+  a symlink cannot launder an out-of-scope or protected file into an
+  authorized name. Enforcement artifacts are self-protected: amending them
+  requires an explicit, auditable grant.
 - **The commit gate** — `git commit` is blocked while validation is owed;
   every allow/deny is recorded.
 - **Durable approvals** — a Gate halts at a boundary and persists a

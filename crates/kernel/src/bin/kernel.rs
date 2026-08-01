@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kernel::clock::now_rfc3339;
 use kernel::event::{Decision, Event, EventLog};
 use kernel::gate::{Approver, AuthMethod, Checkpoint, GateStore, Preconditions};
-use kernel::law::{enforce, Enforcement};
+use kernel::law::Enforcement;
 use kernel::packet::TaskPacket;
 
 #[derive(Parser)]
@@ -691,13 +691,26 @@ fn pre_tool(
         return Ok(ExitCode::SUCCESS);
     };
 
-    let verdict = enforce(&packet, &path, &protected);
+    // Judged against the CANONICAL target: symlinks resolved on the real
+    // filesystem (rooted at the hook's working directory), so a link cannot
+    // launder an out-of-scope or protected target into an authorized name.
+    let verdict = kernel::law::enforce_at(std::path::Path::new("."), &packet, &path, &protected);
     let (decision, transition) = match &verdict {
         Enforcement::Allow => (Decision::Allowed, "pre_tool.edit"),
         // A distinct, auditable transition when an enforcement artifact is amended.
         Enforcement::AllowAmendment => (Decision::Allowed, "pre_tool.enforcement_amendment"),
         Enforcement::Deny(_) => (Decision::Denied, "pre_tool.edit"),
     };
+
+    // Evidence names the real target too: an allowed write through a symlink
+    // must be attributable to where it actually landed.
+    let mut input_refs = vec![format!("path:{path}")];
+    if let Ok(canonical) = kernel::fsutil::canonical_workspace_rel(std::path::Path::new("."), &path)
+    {
+        if canonical != path {
+            input_refs.push(format!("canonical:{canonical}"));
+        }
+    }
 
     if let Some(ledger) = ledger {
         let event = Event {
@@ -708,7 +721,7 @@ fn pre_tool(
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: transition.into(),
-            input_refs: vec![format!("path:{path}")],
+            input_refs: input_refs.clone(),
             output_refs: vec![],
             decision,
             evidence_refs: vec![],

@@ -487,7 +487,13 @@ has a **formal precedence** (`+` loosest); the direction-reversing `governs`
 relation was removed in favor of `flow_connected` / `runs_under`; obligations
 are scoped per run; file authority is decided on **platform-independent**
 normalized components (absolute, `..`, backslash, drive-letter and
-alternate-data-stream vectors all rejected); checkpoints are written with the
+alternate-data-stream vectors all rejected) and judged against the
+**canonical target** on the real filesystem — symlinks in the existing
+portion are resolved fully, so a link cannot launder an out-of-scope or
+protected file into an authorized name; authorization binds to the real
+target, protection covers both names, an escape outside the workspace or a
+dangling link is denied outright, and evidence records both the lexical path
+and the canonical one; checkpoints are written with the
 POSIX atomic-replace sequence (temp → fsync → rename → dir-fsync, with the
 directory fsync on Unix) and hashed, injection-safe names, and the Ledger is
 fsynced; and approver identity distinguishes a *claimed* label from an
@@ -549,8 +555,7 @@ replication multiplicity instead of the compiler refusing the ambiguity. Beyond 
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
-**transactional Hive budget** reservations; **symlink/canonical and case/Unicode-alias**
-resolution for existing write targets; an **online IdP protocol adapter**
+**transactional Hive budget** reservations; an **online IdP protocol adapter**
 (OIDC issuance, directory sync) binding the identity authority itself to
 organizational infrastructure — the offline trust core (authority-signed
 registries with expiry and revocation) exists; a

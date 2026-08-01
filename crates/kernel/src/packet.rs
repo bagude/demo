@@ -131,15 +131,33 @@ impl TaskPacket {
 /// absolute or would escape the workspace root via `..`. `.` and empty segments
 /// are dropped. Refusing (rather than resolving) `..` keeps authority decisions
 /// independent of the filesystem's current contents.
+///
+/// Authority is a security boundary, so the separator semantics are defined
+/// **explicitly and platform-independently** rather than inherited from
+/// `std::path` (which would silently treat `a\b` as one component on Unix and
+/// two on Windows, and would not see `C:\x` as absolute on Unix). We recognize
+/// exactly one separator — `/` — and reject anything that only reads as
+/// absolute or traversing under Windows rules:
+///
+/// * a backslash anywhere (`permitted\..\secret`, UNC `\\host\share`),
+/// * a drive-relative or drive-absolute prefix (`C:`, `C:\x`) — any component
+///   containing `:` (this also rejects NTFS alternate-data-stream syntax).
+///
+/// The check runs the same on every host, so a packet authored on one platform
+/// grants the same authority when enforced on another.
 pub(crate) fn normalize_components(path: &str) -> Option<Vec<&str>> {
     if path.starts_with('/') {
         return None; // absolute paths are never workspace-relative
+    }
+    if path.contains('\\') {
+        return None; // backslash: Windows separator / UNC — refuse outright
     }
     let mut comps = Vec::new();
     for part in path.split('/') {
         match part {
             "" | "." => continue,
             ".." => return None, // traversal escape — refuse outright
+            other if other.contains(':') => return None, // drive letter / ADS
             other => comps.push(other),
         }
     }
@@ -283,6 +301,27 @@ mod tests {
         assert!(!packet.authorizes_write("permitted/../../secret"));
         // The legitimate case still works.
         assert!(packet.authorizes_write("permitted/ok.txt"));
+    }
+
+    #[test]
+    fn windows_style_paths_are_never_authorized() {
+        let packet = TaskPacket {
+            title: "t".into(),
+            objective: "o".into(),
+            constraints: vec![],
+            files: vec![FileScope::write("permitted/")],
+            acceptance_criteria: vec!["x".into()],
+            submitted_by: "me".into(),
+            priority: Priority::Medium,
+            amends_enforcement: false,
+        };
+        // Backslash traversal, UNC, drive-relative, drive-absolute, and NTFS
+        // alternate-data-stream vectors all fail normalization on every host.
+        assert!(!packet.authorizes_write("permitted\\..\\harness\\hooks\\x.sh"));
+        assert!(!packet.authorizes_write("\\\\host\\share\\x"));
+        assert!(!packet.authorizes_write("C:\\Windows\\System32"));
+        assert!(!packet.authorizes_write("permitted/ok.txt:stream"));
+        assert!(!packet.authorizes_write("C:relative"));
     }
 
     #[test]

@@ -160,11 +160,21 @@ impl Expr {
         }
     }
 
-    /// True if `context` governs `p`: `p` runs within `context`, or downstream of
-    /// it via data flow or provisioning. This is the "does A run in the context
-    /// established by B" question the safety rules actually need.
-    pub fn governs(&self, context: PatternKind, p: PatternKind) -> bool {
-        self.is_within(p, context) || self.flows_to(context, p) || self.provisions(context, p)
+    /// True if `a` and `b` sit on the same data path (`a -> b` or `b -> a`,
+    /// possibly through stages). This is *artifact dependency*, deliberately kept
+    /// distinct from control/isolation — it says the two participate together,
+    /// not that one governs the other.
+    pub fn flow_connected(&self, a: PatternKind, b: PatternKind) -> bool {
+        self.flows_to(a, b) || self.flows_to(b, a)
+    }
+
+    /// True if `p` runs within, or downstream of, `entry` — i.e. `p` executes in
+    /// the context that `entry` establishes (used for "a Gate downstream of an
+    /// unattended entrypoint"). Note this is a *downstream/containment* test, not
+    /// a claim that data flow equals control: it is asymmetric and names the
+    /// direction explicitly.
+    pub fn runs_under(&self, entry: PatternKind, p: PatternKind) -> bool {
+        self.is_within(p, entry) || self.flows_to(entry, p) || self.provisions(entry, p)
     }
 
     /// True if `a` and `b` may execute concurrently: they coexist or share a
@@ -273,14 +283,30 @@ impl Parser {
         t
     }
 
-    /// Lowest precedence: `+`, `->`, `=>`, left-associative and same level
-    /// (their relative precedence is immaterial to the structural questions the
-    /// checker asks).
-    fn parse_binary(&mut self) -> Result<Expr, String> {
+    /// Precedence, loosest to tightest: `+`  <  `->` / `=>`  <  `within`  <  `×`.
+    ///
+    /// `+` is loosest because the constitution treats it as cross-cutting
+    /// *instrumentation* attached to a whole pipeline ("attach them with +, not
+    /// →"): `A -> B + C` therefore means `(A -> B) + C`, and the specimen
+    /// `Intake -> Verb within (Law + Gate) + Ledger` means the Ledger coexists
+    /// with the entire `Intake -> …` pipeline. Fixing precedence — rather than
+    /// leaving `+`/`->` at the same level — is required now that topology drives
+    /// safety diagnostics.
+    fn parse_coexist(&mut self) -> Result<Expr, String> {
+        let mut left = self.parse_flow()?;
+        while matches!(self.peek(), Some(Token::Plus)) {
+            self.next();
+            let right = self.parse_flow()?;
+            left = Expr::Coexist(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// `->` and `=>` bind tighter than `+`, left-associative.
+    fn parse_flow(&mut self) -> Result<Expr, String> {
         let mut left = self.parse_within()?;
         while let Some(tok) = self.peek() {
             let ctor: fn(Box<Expr>, Box<Expr>) -> Expr = match tok {
-                Token::Plus => Expr::Coexist,
                 Token::Arrow => Expr::Seq,
                 Token::FatArrow => Expr::Provision,
                 _ => break,
@@ -292,7 +318,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// `within` binds tighter than the binary operators.
+    /// `within` binds tighter than the flow operators.
     fn parse_within(&mut self) -> Result<Expr, String> {
         let mut left = self.parse_postfix()?;
         while matches!(self.peek(), Some(Token::Within)) {
@@ -319,7 +345,7 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.next() {
             Some(Token::LParen) => {
-                let inner = self.parse_binary()?;
+                let inner = self.parse_coexist()?;
                 match self.next() {
                     Some(Token::RParen) => Ok(inner),
                     other => Err(format!("expected ')', got {other:?}")),
@@ -338,7 +364,7 @@ pub fn parse(input: &str) -> Result<Expr, String> {
         return Err("empty composition expression".to_string());
     }
     let mut parser = Parser { tokens, pos: 0 };
-    let expr = parser.parse_binary()?;
+    let expr = parser.parse_coexist()?;
     if parser.pos != parser.tokens.len() {
         return Err(format!(
             "unexpected trailing tokens after position {}",
@@ -409,12 +435,24 @@ mod tests {
         // A gate downstream of an unattended run vs. two independent branches.
         let downstream = parse("NightShift -> Gate").unwrap();
         assert!(downstream.flows_to(PatternKind::NightShift, PatternKind::Gate));
-        assert!(downstream.governs(PatternKind::NightShift, PatternKind::Gate));
+        assert!(downstream.runs_under(PatternKind::NightShift, PatternKind::Gate));
 
         let independent = parse("NightShift + Gate").unwrap();
         assert!(!independent.flows_to(PatternKind::NightShift, PatternKind::Gate));
-        assert!(!independent.governs(PatternKind::NightShift, PatternKind::Gate));
+        assert!(!independent.runs_under(PatternKind::NightShift, PatternKind::Gate));
         assert!(independent.coexist(PatternKind::NightShift, PatternKind::Gate));
+    }
+
+    #[test]
+    fn flow_connected_is_symmetric_and_direction_stays_distinct() {
+        // The canonical `Port -> Night Shift`: the Port feeds the unattended run.
+        let e = parse("Port -> NightShift").unwrap();
+        assert!(e.flows_to(PatternKind::Port, PatternKind::NightShift));
+        assert!(!e.flows_to(PatternKind::NightShift, PatternKind::Port));
+        // flow_connected is symmetric; runs_under (NightShift over Port) is NOT
+        // implied by upstream flow — the two relations stay distinct.
+        assert!(e.flow_connected(PatternKind::Port, PatternKind::NightShift));
+        assert!(!e.runs_under(PatternKind::NightShift, PatternKind::Port));
     }
 
     #[test]
@@ -426,11 +464,22 @@ mod tests {
 
         let p = parse("NightShift => Gate").unwrap();
         assert!(p.provisions(PatternKind::NightShift, PatternKind::Gate));
-        assert!(p.governs(PatternKind::NightShift, PatternKind::Gate));
+        assert!(p.runs_under(PatternKind::NightShift, PatternKind::Gate));
 
         let hive = parse("(Delegate × 3) + Gate").unwrap();
         assert!(hive.is_replicated(PatternKind::Delegate));
         assert!(!hive.is_replicated(PatternKind::Gate));
+    }
+
+    #[test]
+    fn plus_binds_looser_than_arrow() {
+        // `A -> B + C` is `(A -> B) + C`: C (instrumentation) coexists with the
+        // pipeline, it is not sequenced after B.
+        let e = parse("Intake -> Verb + Ledger").unwrap();
+        assert!(matches!(e, Expr::Coexist(_, _)));
+        assert!(e.flows_to(PatternKind::Intake, PatternKind::Verb));
+        assert!(!e.flows_to(PatternKind::Verb, PatternKind::Ledger));
+        assert!(e.coexist(PatternKind::Verb, PatternKind::Ledger));
     }
 
     #[test]

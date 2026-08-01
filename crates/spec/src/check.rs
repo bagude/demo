@@ -429,10 +429,10 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // A Gate *governed by* a Night Shift (running within, or downstream of, an
-    // unattended run) ⇒ durable suspension and precondition revalidation. A Gate
-    // in an independent branch is used attended and needs neither.
-    if expr.governs(PatternKind::NightShift, PatternKind::Gate) {
+    // A Gate that runs within, or downstream of, a Night Shift ⇒ durable
+    // suspension and precondition revalidation. A Gate in an independent branch
+    // is used attended and needs neither.
+    if expr.runs_under(PatternKind::NightShift, PatternKind::Gate) {
         if let Some(gate) = &b.gate {
             let durable = gate.durable == Some(true);
             let resume_ok = gate
@@ -481,9 +481,16 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // A Port *governed by* a Night Shift (runs unattended, with retry/resumption)
-    // ⇒ replay safety. A Port in an independent, attended branch does not.
-    if expr.governs(PatternKind::NightShift, PatternKind::Port) {
+    // A Port that participates in an unattended pipeline ⇒ replay safety. The
+    // Port may be upstream OR downstream of the Night Shift — the canonical
+    // `Port -> Night Shift -> Gate` recipe has the Port feeding the unattended
+    // run — so this uses data-path participation (either direction) or nesting,
+    // not a directional "governs".
+    let port_unattended = expr.contains(PatternKind::NightShift)
+        && (expr.flow_connected(PatternKind::Port, PatternKind::NightShift)
+            || expr.is_within(PatternKind::Port, PatternKind::NightShift)
+            || expr.provisions(PatternKind::NightShift, PatternKind::Port));
+    if port_unattended {
         for p in b
             .ports
             .iter()
@@ -871,6 +878,25 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(!codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
+    }
+
+    #[test]
+    fn canonical_port_feeding_a_night_shift_needs_replay_safety() {
+        // The constitution's Inbox Triage recipe: `Port -> Night Shift -> Gate`.
+        // The Port is UPSTREAM of the unattended run and must still be
+        // replay-safe — the previous directional rule missed this.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Port -> NightShift" }
+bindings:
+  night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: gh, server: github, write: [deploy], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
     }
 
     #[test]

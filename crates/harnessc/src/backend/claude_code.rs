@@ -682,10 +682,11 @@ mod tests {
         let patterns = v["patterns"].as_array().unwrap();
         // Every pattern entry names its enforcement level.
         assert!(patterns.iter().all(|p| p["enforcement"].is_string()));
-        // The Gate is kernel-mediated in the specimen.
+        // The Gate is honestly runtime-enforced (a registered commit hook), not
+        // kernel-mediated — nothing binds the commit action to a checkpoint.
         assert!(patterns
             .iter()
-            .any(|p| p["name"] == "Gate" && p["enforcement"] == "kernel-mediated"));
+            .any(|p| p["name"] == "Gate" && p["enforcement"] == "runtime-enforced"));
     }
 
     #[test]

@@ -614,7 +614,7 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["seq", "prev", "run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
+        "required": ["seq", "prev", "run_id", "action_id", "actor", "timestamp", "transition", "stage", "decision", "playbook_ref", "kernel_ref"],
         "properties": {
             "seq": { "type": "integer", "minimum": 0 },
             "prev": { "type": "string" },
@@ -625,6 +625,7 @@ pub fn event_schema() -> Value {
             "actor": { "type": "string" },
             "timestamp": { "type": "string" },
             "transition": { "type": "string" },
+            "stage": { "enum": ["proposed", "authorized", "executing", "completed", "recorded"] },
             "input_refs": { "type": "array", "items": { "type": "string" } },
             "output_refs": { "type": "array", "items": { "type": "string" } },
             "decision": { "enum": ["allowed", "denied", "approved", "rejected", "recorded"] },

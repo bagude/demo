@@ -572,9 +572,19 @@ the obligation scope `instance` makes a worker's debt that worker's to clear.
 The instance path's third segment addresses the **replica slot**; execution
 retries deliberately stay on the event envelope's `attempt_id` — folding
 retries into identity would make "the same worker, tried again" a different
-worker. Remaining on this arc: a
-**unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
-an **online IdP protocol adapter**
+worker. Every governed event now also names its place in a **unified
+transition protocol** — a `stage` field on the envelope
+(`proposed → authorized → executing → completed`, with `recorded` for
+free-form evidence). The stage is a *field*, not a rewrite of transition
+strings: the chained history is frozen and the Refinery matches transition
+prefixes, so classification rides alongside identity rather than replacing
+it. This closed a real evidence gap — the Gate's own lifecycle previously
+left no Ledger trace at all; now `gate request` records the halt
+(`proposed`), `gate approve` records the decision (`authorized`, approved
+*or* rejected), and `gate verify` records every resume — including each
+refusal, with its reason as an evidence ref, so a tampered-action rejection
+is a first-class chained record and not just an exit code. Remaining on
+this arc: an **online IdP protocol adapter**
 (OIDC issuance, directory sync) binding the identity authority itself to
 organizational infrastructure — the offline trust core (authority-signed
 registries with expiry and revocation) exists; a

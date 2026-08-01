@@ -113,7 +113,7 @@ pub fn kernel_ref() -> String {
 }
 
 pub use event::{
-    line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, CHAIN_GENESIS,
+    line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, Stage, CHAIN_GENESIS,
 };
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
 pub use hive::{

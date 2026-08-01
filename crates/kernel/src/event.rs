@@ -63,11 +63,22 @@ pub struct Event {
     /// References to supporting evidence artifacts.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
-    /// The Playbook (spec) content digest that governed this run — the run
-    /// binding. Lets the log prove which constitutional version was in force
-    /// for each event, essential for overnight Gates and historical replay.
+    /// The Playbook content digest that governed this run — the run binding.
+    /// This is the *compiled interpretation* digest (source + compiler + IR +
+    /// target), not merely the spec bytes, so the log proves which constitutional
+    /// version was in force for each event: essential for overnight Gates and
+    /// historical replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playbook_ref: Option<String>,
+    /// Content digest of the kernel implementation that *executed* this
+    /// transition. A compiled harness identity (`playbook_ref`) is not a runtime
+    /// identity: the same Playbook enforced by a different kernel binary is a
+    /// different governed system. Every event this kernel writes carries its own
+    /// identity, so the log records not just which spec governed but which
+    /// enforcement binary ran. An empty value is explicit historical/foreign
+    /// state — a record this kernel did not write.
+    #[serde(default)]
+    pub kernel_ref: String,
     /// One execution *attempt* of a logical action, distinct from `action_id`,
     /// for replay safety across retries and resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -157,6 +168,7 @@ mod tests {
             decision,
             evidence_refs: vec![],
             playbook_ref: Some("sha256:spec".into()),
+            kernel_ref: "sha256:kernel".into(),
             attempt_id: None,
         }
     }
@@ -179,6 +191,26 @@ mod tests {
         assert!(json.contains("\"playbook_ref\":\"sha256:spec\""));
         let back: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(back.playbook_ref.as_deref(), Some("sha256:spec"));
+    }
+
+    #[test]
+    fn kernel_ref_binds_the_executing_binary_into_every_event() {
+        // Runtime identity, not just compiled identity: the event records which
+        // kernel executed it, and that field survives a serialization round-trip.
+        let e = event(Decision::Allowed);
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"kernel_ref\":\"sha256:kernel\""));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kernel_ref, "sha256:kernel");
+    }
+
+    #[test]
+    fn a_legacy_record_without_kernel_ref_reads_as_explicit_empty() {
+        // Absence is explicit historical state (a record this kernel did not
+        // write), not a deserialization failure — the field defaults to empty.
+        let legacy = r#"{"run_id":"r","action_id":"a","actor":"kernel","timestamp":"t","transition":"pre_tool.edit","decision":"allowed"}"#;
+        let back: Event = serde_json::from_str(legacy).unwrap();
+        assert!(back.kernel_ref.is_empty());
     }
 
     #[test]

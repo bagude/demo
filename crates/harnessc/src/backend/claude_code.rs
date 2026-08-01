@@ -557,10 +557,15 @@ fn harness_readme(prov: &Prov, refs: &Refs) -> GenFile {
     body.push_str(&format!(
         "Compiled from `{}` by `harnessc {}`.\n\n\
          - source `{}` — the specification bytes\n\
-         - compiler `{}` — compiler, back-end, IR schema, target\n\
+         - compiler `{}` — a content digest of the compiler and front-end\n\
+           implementation source, folded with the IR schema and target\n\
          - IR `{}` — the resolved composition graph\n\
          - **playbook `{}`** — all of the above; the identity of this compiled\n\
-           interpretation, and what runtime evidence binds to\n\n",
+           interpretation, and what runtime evidence binds to\n\n\
+         A compiled identity is not a runtime identity: every Ledger event also\n\
+         records `kernel_ref`, a content digest of the kernel binary that actually\n\
+         executed the transition, so the same Playbook enforced by a different\n\
+         kernel is distinguishable in the evidence.\n\n",
         common::SPEC_FILENAME,
         common::GENERATOR_VERSION,
         refs.source_ref,
@@ -766,6 +771,25 @@ platform: { type: claude-code }
         assert!(patterns
             .iter()
             .any(|p| p["name"] == "Gate" && p["enforcement"] == "runtime-enforced"));
+    }
+
+    #[test]
+    fn generated_event_schema_mandates_the_kernel_identity() {
+        // The compiled Ledger schema requires kernel_ref: a governed runtime
+        // event must record which enforcement binary executed it.
+        let g = build();
+        let schema = &find(&g, "harness/schemas/event.schema.json").content;
+        let v: Value = serde_json::from_str(schema).unwrap();
+        let required: Vec<&str> = v["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert!(
+            required.contains(&"kernel_ref"),
+            "runtime identity must be mandatory in the event schema"
+        );
     }
 
     #[test]

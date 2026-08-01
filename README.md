@@ -99,15 +99,29 @@ guarantee. So the identity chain has four links:
 
 ```
 source_ref   = sha256(spec bytes)
-compiler_ref = sha256(harnessc version + spec-crate version + IR schema + target)
+compiler_ref = sha256(compiler + front-end implementation source + IR schema + target)
 ir_ref       = sha256(canonical serialized resolved IR)
 playbook_ref = sha256(source_ref + compiler_ref + target + ir_ref)
 ```
 
-Every generated artifact records all four, and the generated hooks stamp
-`playbook_ref` — the compiled *interpretation* — onto every Ledger event, so a
-run is bound to the semantics that governed it and not merely to the bytes it
-started from.
+`compiler_ref` hashes the compiler's *implementation source*, not its version
+labels: two divergent trees that both still call themselves `0.1.0` — the exact
+state in which a checked-in Playbook once kept claiming a retracted guarantee —
+produce different references, so the divergence is detectable.
+
+Every artifact records `source_ref` and `playbook_ref` in its header; the JSON
+manifests additionally expose `compiler_ref` and `ir_ref` (the shell and Markdown
+headers omit them, but `playbook_ref` cryptographically commits to both). The
+generated hooks stamp `playbook_ref` — the compiled *interpretation* — onto every
+Ledger event, so a run is bound to the semantics that governed it and not merely
+to the bytes it started from.
+
+A compiled identity is still not a runtime identity, though: the same Playbook
+enforced by a different `kernel` is a different governed system. So every Ledger
+event *also* carries `kernel_ref`, a content digest of the kernel implementation
+that executed the transition — recorded by the kernel itself, since only the
+running binary knows which binary it is. The evidence therefore names both which
+spec governed and which kernel ran.
 
 ```sh
 # fail if the checked-in tree is not what this compiler produces
@@ -333,9 +347,12 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   `enforcement.protected`). Editing one requires a packet with
   `amends_enforcement: true` — logged distinctly as `pre_tool.enforcement_amendment` —
   and a Bash hook blocks `rm`/`mv` of them. Amending enforcement is never ambient.
-- **Run binding** (§13) — every Ledger event carries `playbook_ref` (the spec
-  content digest that governed the run), so the log proves which constitutional
-  version was in force. The generated hooks bake in the digest they compiled from.
+- **Run binding** (§13) — every Ledger event carries `playbook_ref` (the
+  compiled-interpretation digest that governed the run), so the log proves which
+  constitutional version was in force. The generated hooks bake in the digest they
+  compiled from. Each event additionally carries `kernel_ref`, the digest of the
+  enforcement binary that executed it — mandatory in the event schema — so the
+  record distinguishes which kernel ran, not just which spec governed.
 - **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
   bind approval to an action hash + precondition snapshot + approver + expiry,
   and **revalidate at resume**: a changed action, drifted precondition, or
@@ -428,8 +445,12 @@ serialized, and generated from; enforcement activation is explicit
 node identity** distinct from binding identity (`Port[github as
 staging_deployer]`, unique, shadow-checked, serialized); **executable
 provenance** binds evidence to the compiled interpretation
-(`playbook_ref = source + compiler + IR + target`) with `harnessc verify` and a
-CI test proving the checked-in tree is fresh; replication **cardinality** is
+(`playbook_ref = source + compiler + IR + target`, where `compiler_ref` is a
+digest of the compiler's implementation source, not its version labels) with
+`harnessc verify` and a CI test proving the checked-in tree is fresh, and every
+Ledger event additionally carries `kernel_ref` — the digest of the kernel that
+executed it — so runtime evidence names the enforcement binary and not just the
+compiled Playbook; replication **cardinality** is
 part of the IR; every bound component — singleton or named — carries activation
 status and provenance; aliases are
 **referenceable in relations** (`staging_deployer -> Gate`), resolved *without

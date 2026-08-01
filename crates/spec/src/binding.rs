@@ -25,7 +25,11 @@ pub enum EnforcementLevel {
     RuntimeMonitored,
     /// Blocked at runtime by a generated hook that calls the kernel.
     RuntimeEnforced,
-    /// Every relevant action passes through the kernel as the policy point.
+    /// Every relevant action provably passes through the kernel — the effect
+    /// *cannot* occur through the binding without it. Reserved: no pattern in the
+    /// current claude-code binding reaches this bar (it would require a
+    /// conformance test proving complete mediation), so it is intentionally
+    /// unused rather than claimed.
     KernelMediated,
 }
 
@@ -54,8 +58,11 @@ pub fn default_enforcement_level(pattern: PatternKind) -> EnforcementLevel {
         PatternKind::Verb => Declared,
         // Guard Laws block via generated hooks calling the kernel.
         PatternKind::Law => RuntimeEnforced,
-        // Checkpoint, approval binding, and revalidation all live in the kernel.
-        PatternKind::Gate => KernelMediated,
+        // A registered commit hook blocks git commit while an obligation is
+        // outstanding; the checkpoint/approval/revalidation APIs are kernel-owned
+        // but not auto-bound to the commit action, so this is not yet full
+        // mediation — only runtime enforcement of the obligation boundary.
+        PatternKind::Gate => RuntimeEnforced,
         // Append-only recording; no blocking.
         PatternKind::Ledger => RuntimeMonitored,
         // Lineage/drift are checked statically; no sandbox runtime is generated.
@@ -68,8 +75,10 @@ pub fn default_enforcement_level(pattern: PatternKind) -> EnforcementLevel {
         PatternKind::Pipeline => StaticallyChecked,
         // MCP config + capability manifest; not yet kernel-mediated.
         PatternKind::Port => StaticallyChecked,
-        // The Law of the Hive is validated per-spawn by the kernel.
-        PatternKind::Hive => KernelMediated,
+        // The Law of the Hive is validated by `kernel hive-spawn`, but nothing in
+        // the generated harness *forces* the orchestrator to call it. So it is
+        // statically checked plus an available runtime validator — not mediation.
+        PatternKind::Hive => StaticallyChecked,
         // Proposes patches; a separate binary, not a blocking control.
         PatternKind::Refinery => RuntimeMonitored,
         // The reproducible bundle itself.
@@ -107,7 +116,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn taxonomy_is_honest_about_scaffolds_vs_kernel() {
+    fn taxonomy_is_honest_about_scaffolds_vs_enforcement() {
         // A scaffold must never claim to be enforced.
         assert_eq!(
             default_enforcement_level(PatternKind::Specialist),
@@ -117,22 +126,49 @@ mod tests {
             default_enforcement_level(PatternKind::Delegate),
             EnforcementLevel::Scaffolded
         );
-        // Genuinely enforced/kernel-mediated patterns rank strictly higher.
+        // Enforced patterns rank strictly higher than scaffolds.
         assert!(
-            default_enforcement_level(PatternKind::Gate)
+            default_enforcement_level(PatternKind::Law)
                 > default_enforcement_level(PatternKind::Specialist)
         );
         assert_eq!(
             default_enforcement_level(PatternKind::Law),
             EnforcementLevel::RuntimeEnforced
         );
+        // Gate is honestly runtime-enforced (a registered hook), not mediated:
+        // the checkpoint/approval APIs are not auto-bound to the commit action.
         assert_eq!(
             default_enforcement_level(PatternKind::Gate),
-            EnforcementLevel::KernelMediated
+            EnforcementLevel::RuntimeEnforced
         );
+        // Hive's Law is statically checked with an *available* validator; the
+        // orchestrator is not forced to call it, so it is not mediated.
         assert_eq!(
             default_enforcement_level(PatternKind::Hive),
-            EnforcementLevel::KernelMediated
+            EnforcementLevel::StaticallyChecked
         );
+        // Nothing in this binding currently claims complete kernel mediation.
+        for k in [
+            PatternKind::Intake,
+            PatternKind::Verb,
+            PatternKind::Law,
+            PatternKind::Gate,
+            PatternKind::Ledger,
+            PatternKind::Sandbox,
+            PatternKind::NightShift,
+            PatternKind::Specialist,
+            PatternKind::Delegate,
+            PatternKind::Critic,
+            PatternKind::Pipeline,
+            PatternKind::Port,
+            PatternKind::Hive,
+            PatternKind::Refinery,
+            PatternKind::Playbook,
+        ] {
+            assert_ne!(
+                default_enforcement_level(k),
+                EnforcementLevel::KernelMediated
+            );
+        }
     }
 }

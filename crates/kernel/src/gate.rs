@@ -279,10 +279,22 @@ impl GateStore {
     }
 
     fn checkpoint_path(&self, gate_id: &str, action_hash: &str) -> PathBuf {
-        // Drop any `algo:` prefix but keep the FULL digest — truncating to a few
-        // characters would let distinct actions collide onto one checkpoint file.
-        let digest = action_hash.rsplit(':').next().unwrap_or(action_hash);
-        self.dir.join(format!("{gate_id}-{digest}.json"))
+        // Derive the filename from a hash of the identifiers rather than
+        // interpolating them: a gate_id or action_hash containing '/' or '..'
+        // must never be able to escape the checkpoint directory. The
+        // human-readable values live inside the JSON body. NUL-separated so
+        // ("a", "bc") and ("ab", "c") cannot collide.
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(gate_id.as_bytes());
+        h.update([0u8]);
+        h.update(action_hash.as_bytes());
+        let digest = h.finalize();
+        let mut name = String::with_capacity(64);
+        for b in digest {
+            name.push_str(&format!("{b:02x}"));
+        }
+        self.dir.join(format!("{name}.json"))
     }
 
     /// Persist a checkpoint durably and atomically (pretty JSON for human

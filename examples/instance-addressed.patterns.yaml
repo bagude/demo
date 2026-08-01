@@ -1,0 +1,67 @@
+# Instance-addressed composition: two Ports, one obligation.
+#
+#   (Port[staging] within Sandbox) -> Gate + Port[metrics] + Law + Ledger
+#
+# Both Ports carry write authority, but only `Port[staging]` runs inside the
+# Sandbox. The `Sandbox + Port ⇒ external isolation` obligation therefore
+# attaches to `staging` alone: it must declare `sandboxed` behavior, while
+# `metrics` — a sibling occurrence outside the Sandbox — does not.
+#
+# Before occurrences had identity, the checker saw only "a Port is within a
+# Sandbox" and applied the obligation to *every* Port binding, so this spec
+# could not have compiled without giving `metrics` a meaningless `sandboxed`
+# field. Naming the instances makes the derived obligation precise.
+
+harness:
+  name: instance-addressed
+  version: 0.1.0
+
+composition:
+  expression: "(Port[staging] within Sandbox) -> Gate + Port[metrics] + Law + Ledger"
+
+bindings:
+  sandbox:
+    workspace: branch
+    lineage: [source_revision, sandbox_id, merge_revision]
+
+  laws:
+    - id: enforce-file-scope
+      kind: guard
+      event: pre_tool
+      applies_to: [edit, write]
+
+  ports:
+    # Inside the Sandbox: its external writes must be contained, so it declares
+    # how it behaves while sandboxed. This is the occurrence the obligation
+    # binds to.
+    - id: staging
+      server: deploy-staging
+      write: [release]
+      write_guard: enforce-file-scope
+      sandboxed: propose
+
+    # Outside the Sandbox: a filesystem sandbox never contained it, so it needs
+    # no `sandboxed` declaration. The obligation does not leak onto it.
+    - id: metrics
+      server: observability
+      write: [annotate]
+      write_guard: enforce-file-scope
+
+  gate:
+    id: approve-deploy
+    boundary: before_deploy
+    checkpoint_schema: harness/schemas/checkpoint.schema.json
+    bind:
+      - action_hash
+      - repository_revision
+      - working_tree_hash
+      - approver
+      - expiry
+
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials, raw_model_context]
+
+platform:
+  type: claude-code

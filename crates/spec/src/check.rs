@@ -11,9 +11,59 @@
 //! intends: "When two patterns meet, ask what new obligation their meeting
 //! creates."
 
+use std::collections::BTreeSet;
+
 use crate::binding::Binding;
 use crate::compose::Expr;
-use crate::model::{LawEvent, LawKind, PatternKind, SpecFile};
+use crate::model::{LawEvent, LawKind, PatternInstance, PatternKind, SpecFile};
+
+/// Which concrete bindings a composition relation refers to.
+///
+/// This is the instance-addressability bridge between the topology and the
+/// bindings: a relation like `Port within Sandbox` yields a set of Port
+/// *occurrences*, and this turns them into a predicate over binding ids. An
+/// anonymous occurrence (`Port`) names *every* binding of its kind — the
+/// conservative reading when the author did not disambiguate — so a derived
+/// obligation still applies to all of them. Labelled occurrences
+/// (`Port[staging]`) name exactly those bindings, so the obligation attaches to
+/// the component that actually stands in the relation and not its siblings.
+enum Refers {
+    /// Every binding of the kind (at least one anonymous occurrence was found).
+    All,
+    /// Exactly these binding ids.
+    Ids(BTreeSet<String>),
+}
+
+impl Refers {
+    /// Fold a set of occurrences into a binding predicate. Any anonymous
+    /// occurrence widens the reference to `All`.
+    fn from(instances: &[&PatternInstance]) -> Self {
+        let mut ids = BTreeSet::new();
+        for i in instances {
+            match &i.id {
+                Some(id) => {
+                    ids.insert(id.clone());
+                }
+                None => return Refers::All,
+            }
+        }
+        Refers::Ids(ids)
+    }
+
+    /// Whether the binding with this id is one the relation refers to.
+    fn includes(&self, id: &str) -> bool {
+        match self {
+            Refers::All => true,
+            Refers::Ids(ids) => ids.contains(id),
+        }
+    }
+
+    /// Whether the relation refers to no binding at all (so a rule keyed on it
+    /// should not fire).
+    fn is_empty(&self) -> bool {
+        matches!(self, Refers::Ids(ids) if ids.is_empty())
+    }
+}
 
 /// Whether a diagnostic blocks compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,10 +479,10 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // A Gate *governed by* a Night Shift (running within, or downstream of, an
-    // unattended run) ⇒ durable suspension and precondition revalidation. A Gate
-    // in an independent branch is used attended and needs neither.
-    if expr.governs(PatternKind::NightShift, PatternKind::Gate) {
+    // A Gate that runs within, or downstream of, a Night Shift ⇒ durable
+    // suspension and precondition revalidation. A Gate in an independent branch
+    // is used attended and needs neither.
+    if expr.runs_under(PatternKind::NightShift, PatternKind::Gate) {
         if let Some(gate) = &b.gate {
             let durable = gate.durable == Some(true);
             let resume_ok = gate
@@ -481,34 +531,49 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // A Port *governed by* a Night Shift (runs unattended, with retry/resumption)
-    // ⇒ replay safety. A Port in an independent, attended branch does not.
-    if expr.governs(PatternKind::NightShift, PatternKind::Port) {
-        for p in b
-            .ports
-            .iter()
-            .filter(|p| !p.write.is_empty() && !p.idempotent)
-        {
-            d.push(Diagnostic::error(
-                "composition.port_replay_safety",
-                format!(
-                    "port '{}' has write authority and runs unattended (Night Shift) but is not \
-                     idempotent; absence of a local success record is not evidence the external \
-                     action did not occur",
-                    p.id
-                ),
-            ));
+    // A Port that participates in an unattended pipeline ⇒ replay safety. The
+    // Port may be upstream OR downstream of the Night Shift — the canonical
+    // `Port -> Night Shift -> Gate` recipe has the Port feeding the unattended
+    // run — so this uses data-path participation (either direction) or nesting,
+    // not a directional "governs". Instance-addressed: only the Port occurrences
+    // actually on the unattended path carry the obligation, so an attended
+    // `Port[metrics]` beside a `Port[deploy] -> NightShift` is left alone.
+    if expr.contains(PatternKind::NightShift) {
+        let mut unattended = expr.instances_within(PatternKind::Port, PatternKind::NightShift);
+        unattended
+            .extend(expr.instances_flow_connected(PatternKind::Port, PatternKind::NightShift));
+        unattended.extend(expr.instances_provisioned(PatternKind::NightShift, PatternKind::Port));
+        let refers = Refers::from(&unattended);
+        if !refers.is_empty() {
+            for p in b
+                .ports
+                .iter()
+                .filter(|p| refers.includes(&p.id) && !p.write.is_empty() && !p.idempotent)
+            {
+                d.push(Diagnostic::error(
+                    "composition.port_replay_safety",
+                    format!(
+                        "port '{}' has write authority and runs unattended (Night Shift) but is not \
+                         idempotent; absence of a local success record is not evidence the external \
+                         action did not occur",
+                        p.id
+                    ),
+                ));
+            }
         }
     }
 
     // A Port running *within* a Sandbox ⇒ external isolation. Copy-on-write
     // isolates the filesystem, not the world; a sandboxed Port write must be
-    // isolated, disabled, or a proposal. A Port outside the sandbox is unaffected.
-    if expr.is_within(PatternKind::Port, PatternKind::Sandbox) {
+    // isolated, disabled, or a proposal. A Port outside the sandbox is
+    // unaffected — and now that is decided per occurrence, so `Port[b]` beside
+    // `Port[a] within Sandbox` does not inherit the obligation.
+    let sandboxed = Refers::from(&expr.instances_within(PatternKind::Port, PatternKind::Sandbox));
+    if !sandboxed.is_empty() {
         for p in b
             .ports
             .iter()
-            .filter(|p| !p.write.is_empty() && p.sandboxed.is_none())
+            .filter(|p| sandboxed.includes(&p.id) && !p.write.is_empty() && p.sandboxed.is_none())
         {
             d.push(Diagnostic::error(
                 "composition.sandbox_port_isolation",
@@ -522,9 +587,15 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
     }
 
     // A Gate *within* a Hive ⇒ approval scope must be declared: global vs.
-    // per-worker are different systems. A Gate outside the Hive is unaffected.
-    if expr.is_within(PatternKind::Gate, PatternKind::Hive) {
-        for h in b.hives.iter().filter(|h| h.approval_scope.is_none()) {
+    // per-worker are different systems. Only the Hive occurrence that actually
+    // encloses the Gate needs the declaration; a sibling Hive is unaffected.
+    let gated_hives = Refers::from(&expr.instances_enclosing(PatternKind::Gate, PatternKind::Hive));
+    if !gated_hives.is_empty() {
+        for h in b
+            .hives
+            .iter()
+            .filter(|h| gated_hives.includes(&h.id) && h.approval_scope.is_none())
+        {
             d.push(Diagnostic::error(
                 "composition.hive_gate_approval_scope",
                 format!(
@@ -840,6 +911,62 @@ platform: { type: claude-code }
     }
 
     #[test]
+    fn only_the_sandboxed_port_instance_needs_isolation() {
+        // The reviewer's example: two Port bindings, one named inside the
+        // Sandbox and one outside. Neither declares `sandboxed`, but only the
+        // enclosed occurrence should trip the isolation rule — the obligation
+        // attaches to the component, not the pattern category.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging] within Sandbox + Port[metrics]"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: deploy, write: [release], write_guard: guard-writes }
+    - { id: metrics, server: obs, write: [annotate], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        let diags = check_yaml(yaml);
+        let offenders: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == "composition.sandbox_port_isolation")
+            .collect();
+        assert_eq!(offenders.len(), 1, "only the enclosed port should fire");
+        assert!(
+            offenders[0].message.contains("staging"),
+            "the staging port is the one inside the sandbox: {}",
+            offenders[0].message
+        );
+    }
+
+    #[test]
+    fn an_anonymous_port_still_covers_every_binding() {
+        // A bare `Port within Sandbox` names no instance, so the obligation
+        // conservatively applies to every Port binding, as before.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port within Sandbox"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: a, server: s1, write: [x], write_guard: guard-writes }
+    - { id: b, server: s2, write: [y], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        let offenders = codes(&check_yaml(yaml))
+            .into_iter()
+            .filter(|c| *c == "composition.sandbox_port_isolation")
+            .count();
+        assert_eq!(offenders, 2, "anonymous Port covers both bindings");
+    }
+
+    #[test]
     fn port_writes_unattended_without_idempotency_is_rejected() {
         let yaml = r#"
 harness: { name: n, version: 0.1.0 }
@@ -871,6 +998,25 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(!codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
+    }
+
+    #[test]
+    fn canonical_port_feeding_a_night_shift_needs_replay_safety() {
+        // The constitution's Inbox Triage recipe: `Port -> Night Shift -> Gate`.
+        // The Port is UPSTREAM of the unattended run and must still be
+        // replay-safe — the previous directional rule missed this.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Port -> NightShift" }
+bindings:
+  night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: gh, server: github, write: [deploy], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
     }
 
     #[test]

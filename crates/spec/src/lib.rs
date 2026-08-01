@@ -17,8 +17,8 @@ pub mod model;
 
 pub use binding::{default_enforcement_level, Binding, EnforcementLevel};
 pub use check::{check, Diagnostic, Severity};
-pub use compose::Expr;
-pub use model::SpecFile;
+pub use compose::{Expr, Sel};
+pub use model::{PatternInstance, PatternKind, SpecFile};
 
 /// A successfully compiled specification: the typed model, its parsed
 /// composition tree, and any non-fatal warnings.

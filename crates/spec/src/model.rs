@@ -386,6 +386,46 @@ impl fmt::Display for PatternKind {
     }
 }
 
+/// A single *occurrence* of a pattern in a composition, optionally naming which
+/// binding it refers to.
+///
+/// This is what makes the composition graph instance-addressable. `Port` is an
+/// anonymous occurrence — it stands for *every* Port binding of its kind, which
+/// is the right (conservative) reading when the author has not disambiguated.
+/// `Port[staging-deployer]` names exactly one binding, so a derived obligation
+/// attaches to that component rather than to the pattern category. Two anonymous
+/// occurrences of the same kind are indistinguishable; two labelled ones are
+/// distinct iff their ids differ.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PatternInstance {
+    pub kind: PatternKind,
+    /// The binding id this occurrence names, or `None` for an anonymous
+    /// occurrence that stands for every binding of `kind`.
+    pub id: Option<String>,
+}
+
+impl PatternInstance {
+    pub fn anonymous(kind: PatternKind) -> Self {
+        PatternInstance { kind, id: None }
+    }
+
+    pub fn named(kind: PatternKind, id: impl Into<String>) -> Self {
+        PatternInstance {
+            kind,
+            id: Some(id.into()),
+        }
+    }
+}
+
+impl fmt::Display for PatternInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.id {
+            Some(id) => write!(f, "{}[{id}]", self.kind),
+            None => f.write_str(self.kind.as_str()),
+        }
+    }
+}
+
 impl FromStr for PatternKind {
     type Err = String;
 

@@ -108,14 +108,21 @@ pub fn validate_spawn(
 }
 
 /// Conflict discipline: concurrent workers must have disjoint declared write
-/// sets. Returns the first overlapping (i, j, path) if any two requests share a
-/// write path — the distributed form of the Sandbox drift obligation.
+/// sets. Returns the first overlapping `(i, j, path)` if any two requests share
+/// write authority — the distributed form of the Sandbox drift obligation.
+///
+/// Overlap is decided on normalized path components, not string equality, so
+/// `src/` and `src/lib.rs` are correctly recognized as conflicting.
 pub fn first_write_conflict(reqs: &[SpawnRequest]) -> Option<(usize, usize, String)> {
     for i in 0..reqs.len() {
         for j in (i + 1)..reqs.len() {
-            for path in &reqs[i].write_scope {
-                if reqs[j].write_scope.contains(path) {
-                    return Some((i, j, path.clone()));
+            for a in &reqs[i].write_scope {
+                if reqs[j]
+                    .write_scope
+                    .iter()
+                    .any(|b| crate::packet::scopes_overlap(a, b))
+                {
+                    return Some((i, j, a.clone()));
                 }
             }
         }
@@ -195,5 +202,16 @@ mod tests {
         let mut b = req();
         b.write_scope = vec!["shard-b/".into()];
         assert!(first_write_conflict(&[a, b]).is_none());
+    }
+
+    #[test]
+    fn nested_write_scopes_are_a_conflict() {
+        // A directory scope and a file beneath it must be recognized as
+        // conflicting, not just identical strings.
+        let mut a = req();
+        a.write_scope = vec!["src/".into()];
+        let mut b = req();
+        b.write_scope = vec!["src/lib.rs".into()];
+        assert!(first_write_conflict(&[a, b]).is_some());
     }
 }

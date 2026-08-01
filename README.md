@@ -106,12 +106,31 @@ Each of these is a compile **error**, verified by tests in
   reference declared Ports (never broader authority than granted).
 - **`hive.*`** — the Law of the Hive: a Hive must declare budget, depth,
   termination, merge, worker isolation, and a real worker contract.
-- **Composition case law** — obligations that exist only because two patterns
-  meet: `Gate + NightShift` ⇒ durable, revalidating suspension;
-  `Sandbox + Ledger` ⇒ recorded lineage; **`Obligation Law + Gate`** ⇒ the
-  obligation discharged *through* the Gate; `Port + NightShift` ⇒ replay-safe
-  idempotency; `Sandbox + Port` ⇒ declared external isolation; `Hive + Gate` ⇒
-  declared approval scope.
+- **Composition case law (relation-aware)** — obligations that exist only
+  because two patterns meet *in a particular topology*. The checker asks the
+  composition AST relational questions (`is_within`, `flows_to`, `provisions`,
+  `governs`, `may_execute_concurrently`), not mere presence, so a Gate in one
+  independent branch and a Night Shift in another do **not** trip the rule.
+  A Gate **governed by** a Night Shift ⇒ durable, revalidating suspension; a
+  Port governed by a Night Shift ⇒ replay-safe idempotency; a Port **within** a
+  Sandbox ⇒ declared external isolation; a Gate **within** a Hive ⇒ declared
+  approval scope; **`Obligation Law + Gate`** ⇒ the obligation discharged
+  *through* the Gate; `Sandbox + Ledger` ⇒ recorded lineage.
+
+## Enforcement honesty
+
+"Bindable" is not "enforced", so every pattern carries an explicit
+**enforcement level** — `scaffolded` < `declared` < `statically-checked` <
+`runtime-monitored` < `runtime-enforced` < `kernel-mediated`. `harnessc show`
+prints it per pattern, and `harness/playbook.json` records it:
+
+```
+Gate         kernel-mediated
+Law          runtime-enforced
+Ledger       runtime-monitored
+Port         statically-checked
+Delegate     scaffolded
+```
 
 ## What the kernel actually enforces
 
@@ -183,7 +202,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 88 tests: metamodel, checker rejections for every
+cargo test --workspace     # 104 tests: metamodel, checker rejections for every
                            # pattern, composition parser + case law, kernel
                            # enforcement + self-protection + Law of the Hive, gate
                            # revalidation + obligations, playbook_ref run binding,
@@ -192,16 +211,18 @@ cargo test --workspace     # 88 tests: metamodel, checker rejections for every
 
 ## Status and next steps
 
-Aligned to constitution **v1.2**, with **all fourteen patterns bindable**: the
-scale patterns (Specialist, Delegate/Critic, Pipeline, Port, Hive) now have typed
-bindings, completeness checks, Claude Code generation, and their v1.2 composition
-case-law. The Law of the Hive is kernel-enforced (`kernel hive-spawn` validates
-each spawn's parent/contract/budget/depth/termination/merge/scope), and the Port
-replay-safety, Sandbox+Port isolation, and Hive+Gate approval-scope pairings are
-checker rules.
+Aligned to constitution **v1.2**, with **all fourteen patterns bindable** and a
+**relation-aware** composition checker. Hardening from external review is in:
+obligations are scoped per run; file authority is decided on normalized path
+components (traversal/absolute rejected); checkpoints are written atomically
+(temp → fsync → rename → dir-fsync) with full-digest names and the Ledger is
+fsynced; and approver identity distinguishes a *claimed* label from an
+authenticated principal.
 
-Natural continuations: a Python/OpenAI-Agents back-end behind the same `Binding`;
-richer Claude Code artifacts for the scale patterns (fuller agent/skill/MCP
-scaffolds); wiring `attempt_id` into a real Port replay path; and
-version-promotion tooling that applies an approved Refinery proposal and
-recompiles.
+Documented follow-ups (not yet done): a **unified transition protocol**
+(Proposed→Authorized→Executing→…→Recorded) to turn the independent runtime
+modules into one execution kernel; **transactional Hive budget** reservations;
+a **tamper-evident Ledger** (sequence + prev-hash chain); **symlink/canonical**
+resolution for existing write targets; a real **IdP/signature** integration for
+approvals; a **Python/OpenAI-Agents** back-end behind the same `Binding`; and
+version-promotion tooling for approved Refinery proposals.

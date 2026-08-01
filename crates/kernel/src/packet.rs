@@ -116,22 +116,74 @@ impl TaskPacket {
 
     /// Whether `path` is authorized for writing by this packet.
     ///
-    /// A scope entry authorizes `path` when it matches exactly, or when the
-    /// scope entry ends in `/` and is a prefix of `path` (a directory grant).
-    /// This is the primitive a Guard Law calls to decide whether an edit is
-    /// inside the packet's contract.
+    /// Authority is decided on *normalized path components*, not raw strings: a
+    /// path that is absolute or escapes its root with `..` is never authorized,
+    /// even if it lexically shares a prefix with a scope entry (this closes the
+    /// `permitted/../harness/hooks/x.sh` bypass). A scope entry ending in `/`
+    /// grants everything strictly underneath it; otherwise it grants that exact
+    /// file. This is the primitive a Guard Law calls.
     pub fn authorizes_write(&self, path: &str) -> bool {
         self.writable_paths().any(|scope| path_matches(scope, path))
     }
 }
 
-/// Returns true when `scope` grants authority over `path`: an exact match, or
-/// a directory grant (`scope` ends in `/` and is a prefix of `path`).
-pub(crate) fn path_matches(scope: &str, path: &str) -> bool {
-    if scope == path {
-        return true;
+/// Normalize a workspace-relative path into its components, or `None` if it is
+/// absolute or would escape the workspace root via `..`. `.` and empty segments
+/// are dropped. Refusing (rather than resolving) `..` keeps authority decisions
+/// independent of the filesystem's current contents.
+pub(crate) fn normalize_components(path: &str) -> Option<Vec<&str>> {
+    if path.starts_with('/') {
+        return None; // absolute paths are never workspace-relative
     }
-    scope.ends_with('/') && path.starts_with(scope)
+    let mut comps = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => return None, // traversal escape — refuse outright
+            other => comps.push(other),
+        }
+    }
+    Some(comps)
+}
+
+/// Returns true when `scope` grants authority over `path`, comparing normalized
+/// components. A directory scope (`scope` ends in `/`) grants paths strictly
+/// beneath it; a file scope grants an exact match. A `path` that fails
+/// normalization (absolute or `..`-escaping) is never granted.
+pub(crate) fn path_matches(scope: &str, path: &str) -> bool {
+    let is_dir = scope.ends_with('/');
+    let (Some(sc), Some(pc)) = (normalize_components(scope), normalize_components(path)) else {
+        return false;
+    };
+    if is_dir {
+        // Strictly underneath: the path has the scope as a proper prefix.
+        pc.len() > sc.len() && pc[..sc.len()] == sc[..]
+    } else {
+        pc == sc
+    }
+}
+
+/// Whether two write scopes overlap — i.e. one is a prefix of (or equal to) the
+/// other on normalized components. Used for Hive conflict discipline so that
+/// `src/` and `src/lib.rs` are recognized as conflicting, not just identical
+/// strings. Un-normalizable scopes conservatively count as overlapping.
+pub fn scopes_overlap(a: &str, b: &str) -> bool {
+    let a_dir = a.ends_with('/');
+    let b_dir = b.ends_with('/');
+    let (Some(ac), Some(bc)) = (normalize_components(a), normalize_components(b)) else {
+        return true; // can't prove disjoint → treat as conflict
+    };
+    let (short, long, short_dir) = if ac.len() <= bc.len() {
+        (&ac, &bc, a_dir)
+    } else {
+        (&bc, &ac, b_dir)
+    };
+    if short.as_slice() == &long[..short.len()] {
+        // Equal, or the shorter is a directory prefix of the longer.
+        short.len() == long.len() || short_dir
+    } else {
+        false
+    }
 }
 
 /// A validated task packet that has been admitted into state.
@@ -210,6 +262,38 @@ mod tests {
         assert!(packet.authorizes_write("docs/guide.md"));
         assert!(!packet.authorizes_write("src/main.rs"));
         assert!(!packet.authorizes_write("docs")); // not a directory grant match
+    }
+
+    #[test]
+    fn traversal_and_absolute_paths_are_never_authorized() {
+        let packet = TaskPacket {
+            title: "t".into(),
+            objective: "o".into(),
+            constraints: vec![],
+            files: vec![FileScope::write("permitted/")],
+            acceptance_criteria: vec!["x".into()],
+            submitted_by: "me".into(),
+            priority: Priority::Medium,
+            amends_enforcement: false,
+        };
+        // Lexical prefix match would wrongly allow this; component normalization
+        // rejects the `..` escape.
+        assert!(!packet.authorizes_write("permitted/../harness/hooks/x.sh"));
+        assert!(!packet.authorizes_write("/etc/passwd"));
+        assert!(!packet.authorizes_write("permitted/../../secret"));
+        // The legitimate case still works.
+        assert!(packet.authorizes_write("permitted/ok.txt"));
+    }
+
+    #[test]
+    fn nested_scopes_overlap() {
+        assert!(scopes_overlap("src/", "src/lib.rs"));
+        assert!(scopes_overlap("src/lib.rs", "src/"));
+        assert!(scopes_overlap("a/b/", "a/b/c/d.rs"));
+        assert!(!scopes_overlap("src/", "tests/"));
+        assert!(!scopes_overlap("src/a.rs", "src/b.rs"));
+        // Un-normalizable scope is conservatively treated as a conflict.
+        assert!(scopes_overlap("../x", "y"));
     }
 
     #[test]

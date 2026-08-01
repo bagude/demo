@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use kernel::clock::now_rfc3339;
 use kernel::event::{Decision, Event, EventLog};
-use kernel::gate::{Checkpoint, GateStore, Preconditions};
+use kernel::gate::{Approver, AuthMethod, Checkpoint, GateStore, Preconditions};
 use kernel::law::{enforce, Enforcement};
 use kernel::packet::TaskPacket;
 
@@ -88,6 +88,9 @@ enum Command {
         ledger: PathBuf,
         #[arg(long = "require")]
         require: Vec<String>,
+        /// The run whose obligations are evaluated (obligations are per-run).
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
     },
     /// Discharge an obligation: optionally run a check command, and on success
     /// append a discharge event so a Gate that requires it can proceed.
@@ -179,6 +182,13 @@ enum GateCmd {
         checkpoint: PathBuf,
         #[arg(long)]
         approver: String,
+        /// How the approver identity was established. Defaults to `claimed`
+        /// (unauthenticated, caller-asserted) — recorded honestly as such.
+        #[arg(long, value_enum, default_value_t = AuthArg::Claimed)]
+        auth: AuthArg,
+        /// Reference to the authentication evidence (never the secret itself).
+        #[arg(long)]
+        auth_evidence: Option<String>,
         #[arg(long)]
         expiry: Option<String>,
     },
@@ -206,6 +216,23 @@ enum DecisionArg {
     Approved,
     Rejected,
     Recorded,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum AuthArg {
+    Claimed,
+    Token,
+    Signature,
+}
+
+impl From<AuthArg> for AuthMethod {
+    fn from(a: AuthArg) -> Self {
+        match a {
+            AuthArg::Claimed => AuthMethod::Claimed,
+            AuthArg::Token => AuthMethod::Token,
+            AuthArg::Signature => AuthMethod::Signature,
+        }
+    }
 }
 
 impl From<DecisionArg> for Decision {
@@ -285,7 +312,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             EventLog::at(&ledger).append(&event)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::PreCommit { ledger, require } => {
+        Command::PreCommit {
+            ledger,
+            require,
+            run_id,
+        } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
             // Only a git commit is gated here; everything else passes.
@@ -293,7 +324,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 return Ok(ExitCode::SUCCESS);
             }
             let events = EventLog::at(&ledger).read_all().unwrap_or_default();
-            let outstanding = kernel::obligation::outstanding(&events, &require);
+            let outstanding = kernel::obligation::outstanding(&events, &require, &run_id);
             if outstanding.is_empty() {
                 Ok(ExitCode::SUCCESS)
             } else {
@@ -582,9 +613,17 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
         GateCmd::Approve {
             checkpoint,
             approver,
+            auth,
+            auth_evidence,
             expiry,
         } => {
             let mut cp = GateStore::load(&checkpoint)?;
+            let approver = Approver {
+                principal: approver,
+                auth: auth.into(),
+                evidence: auth_evidence,
+            };
+            let authed = approver.is_authenticated();
             cp.approve(approver, now_rfc3339(), expiry);
             let store = GateStore::at(
                 checkpoint
@@ -592,10 +631,16 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     .unwrap_or_else(|| std::path::Path::new(".")),
             );
             store.save(&cp)?;
+            let a = cp.approval.as_ref().unwrap();
             println!(
-                "approved {} by {}",
+                "approved {} by {} ({})",
                 cp.action_hash,
-                cp.approval.as_ref().unwrap().approver
+                a.approver.principal,
+                if authed {
+                    "authenticated"
+                } else {
+                    "claimed — unauthenticated"
+                }
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -623,7 +668,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 };
                 let events = EventLog::at(&ledger).read_all()?;
                 let outstanding =
-                    kernel::obligation::outstanding(&events, &cp.requires_obligations);
+                    kernel::obligation::outstanding(&events, &cp.requires_obligations, &cp.run_id);
                 if let Err(e) = cp.check_obligations(&outstanding) {
                     eprintln!("gate refused: {e}");
                     return Ok(ExitCode::FAILURE);

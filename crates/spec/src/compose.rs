@@ -76,6 +76,104 @@ impl Expr {
             Expr::Replicate(a, _) => a.collect_within(out),
         }
     }
+
+    // ---- relational queries -------------------------------------------------
+    //
+    // These ask about *topology*, not mere presence. `Gate + NightShift` (two
+    // independent branches) is a different system from `NightShift -> Gate`
+    // (a gate downstream of an unattended run), and the composition rules must
+    // distinguish them.
+
+    /// True if some occurrence of `inner` executes within some occurrence of
+    /// `outer` (`inner within outer`).
+    pub fn is_within(&self, inner: PatternKind, outer: PatternKind) -> bool {
+        match self {
+            Expr::Within(l, r) => {
+                (l.contains(inner) && r.contains(outer))
+                    || l.is_within(inner, outer)
+                    || r.is_within(inner, outer)
+            }
+            Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Provision(l, r) => {
+                l.is_within(inner, outer) || r.is_within(inner, outer)
+            }
+            Expr::Replicate(e, _) => e.is_within(inner, outer),
+            Expr::Pattern(_) => false,
+        }
+    }
+
+    /// True if `from`'s output flows into `to` (`from -> to`), possibly through
+    /// intermediate stages. Directional.
+    pub fn flows_to(&self, from: PatternKind, to: PatternKind) -> bool {
+        match self {
+            Expr::Seq(l, r) => {
+                (l.contains(from) && r.contains(to)) || l.flows_to(from, to) || r.flows_to(from, to)
+            }
+            Expr::Coexist(l, r) | Expr::Provision(l, r) | Expr::Within(l, r) => {
+                l.flows_to(from, to) || r.flows_to(from, to)
+            }
+            Expr::Replicate(e, _) => e.flows_to(from, to),
+            Expr::Pattern(_) => false,
+        }
+    }
+
+    /// True if `provisioner` provisions `provisioned` (`provisioner => provisioned`).
+    pub fn provisions(&self, provisioner: PatternKind, provisioned: PatternKind) -> bool {
+        match self {
+            Expr::Provision(l, r) => {
+                (l.contains(provisioner) && r.contains(provisioned))
+                    || l.provisions(provisioner, provisioned)
+                    || r.provisions(provisioner, provisioned)
+            }
+            Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Within(l, r) => {
+                l.provisions(provisioner, provisioned) || r.provisions(provisioner, provisioned)
+            }
+            Expr::Replicate(e, _) => e.provisions(provisioner, provisioned),
+            Expr::Pattern(_) => false,
+        }
+    }
+
+    /// True if `a` and `b` coexist independently (under `+`).
+    pub fn coexist(&self, a: PatternKind, b: PatternKind) -> bool {
+        match self {
+            Expr::Coexist(l, r) => {
+                (l.contains(a) && r.contains(b))
+                    || (l.contains(b) && r.contains(a))
+                    || l.coexist(a, b)
+                    || r.coexist(a, b)
+            }
+            Expr::Seq(l, r) | Expr::Provision(l, r) | Expr::Within(l, r) => {
+                l.coexist(a, b) || r.coexist(a, b)
+            }
+            Expr::Replicate(e, _) => e.coexist(a, b),
+            Expr::Pattern(_) => false,
+        }
+    }
+
+    /// True if `p` appears inside a replicated (`× N`) subtree.
+    pub fn is_replicated(&self, p: PatternKind) -> bool {
+        match self {
+            Expr::Replicate(e, _) => e.contains(p) || e.is_replicated(p),
+            Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Provision(l, r) | Expr::Within(l, r) => {
+                l.is_replicated(p) || r.is_replicated(p)
+            }
+            Expr::Pattern(_) => false,
+        }
+    }
+
+    /// True if `context` governs `p`: `p` runs within `context`, or downstream of
+    /// it via data flow or provisioning. This is the "does A run in the context
+    /// established by B" question the safety rules actually need.
+    pub fn governs(&self, context: PatternKind, p: PatternKind) -> bool {
+        self.is_within(p, context) || self.flows_to(context, p) || self.provisions(context, p)
+    }
+
+    /// True if `a` and `b` may execute concurrently: they coexist or share a
+    /// replicated subtree, and neither is sequenced before the other.
+    pub fn may_execute_concurrently(&self, a: PatternKind, b: PatternKind) -> bool {
+        (self.coexist(a, b) || (self.is_replicated(a) && self.is_replicated(b)))
+            && !self.flows_to(a, b)
+            && !self.flows_to(b, a)
+    }
 }
 
 // ---- tokenizer --------------------------------------------------------------
@@ -304,6 +402,43 @@ mod tests {
         ] {
             assert!(p.contains(&kind), "missing {kind}");
         }
+    }
+
+    #[test]
+    fn relational_queries_distinguish_topology() {
+        // A gate downstream of an unattended run vs. two independent branches.
+        let downstream = parse("NightShift -> Gate").unwrap();
+        assert!(downstream.flows_to(PatternKind::NightShift, PatternKind::Gate));
+        assert!(downstream.governs(PatternKind::NightShift, PatternKind::Gate));
+
+        let independent = parse("NightShift + Gate").unwrap();
+        assert!(!independent.flows_to(PatternKind::NightShift, PatternKind::Gate));
+        assert!(!independent.governs(PatternKind::NightShift, PatternKind::Gate));
+        assert!(independent.coexist(PatternKind::NightShift, PatternKind::Gate));
+    }
+
+    #[test]
+    fn within_and_provisions_and_replication() {
+        let e = parse("Verb within (Law + Gate)").unwrap();
+        assert!(e.is_within(PatternKind::Verb, PatternKind::Law));
+        assert!(e.is_within(PatternKind::Verb, PatternKind::Gate));
+        assert!(!e.is_within(PatternKind::Law, PatternKind::Verb));
+
+        let p = parse("NightShift => Gate").unwrap();
+        assert!(p.provisions(PatternKind::NightShift, PatternKind::Gate));
+        assert!(p.governs(PatternKind::NightShift, PatternKind::Gate));
+
+        let hive = parse("(Delegate × 3) + Gate").unwrap();
+        assert!(hive.is_replicated(PatternKind::Delegate));
+        assert!(!hive.is_replicated(PatternKind::Gate));
+    }
+
+    #[test]
+    fn flow_is_transitive_through_stages() {
+        let e = parse("Port -> NightShift -> Gate").unwrap();
+        // Port's output reaches the Gate through the Night Shift.
+        assert!(e.flows_to(PatternKind::Port, PatternKind::Gate));
+        assert!(e.flows_to(PatternKind::NightShift, PatternKind::Gate));
     }
 
     #[test]

@@ -188,7 +188,15 @@ pub fn checkpoint_schema() -> Value {
                 "type": "object",
                 "required": ["approver", "action_hash", "approved_at"],
                 "properties": {
-                    "approver": { "type": "string" },
+                    "approver": {
+                        "type": "object",
+                        "required": ["principal", "auth"],
+                        "properties": {
+                            "principal": { "type": "string" },
+                            "auth": { "enum": ["claimed", "token", "signature"] },
+                            "evidence": { "type": "string" }
+                        }
+                    },
                     "action_hash": { "type": "string" },
                     "preconditions": { "type": "object", "additionalProperties": { "type": "string" } },
                     "approved_at": { "type": "string" },

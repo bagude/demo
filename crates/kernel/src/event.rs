@@ -112,7 +112,10 @@ impl EventLog {
             .append(true)
             .open(&self.path)?;
         file.write_all(line.as_bytes())?;
-        file.flush()
+        file.flush()?;
+        // Durably persist the appended record so a host failure cannot lose an
+        // already-acknowledged governed event.
+        file.sync_all()
     }
 
     /// Read every event in insertion order. A missing log reads as empty.

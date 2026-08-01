@@ -22,12 +22,20 @@ pub fn discharge_transition(id: &str) -> String {
     format!("obligation.discharge.{id}")
 }
 
-/// Whether obligation `id` is currently open, given the full event stream.
-pub fn is_open(events: &[Event], id: &str) -> bool {
+/// Whether obligation `id` is currently open **within run `run_id`**.
+///
+/// Obligations are scoped to a run: an edit in run A opening an obligation is
+/// not discharged by a validation in run B. Only events whose `run_id` matches
+/// are considered, so concurrent or historical runs cannot satisfy each other's
+/// obligations.
+pub fn is_open(events: &[Event], id: &str, run_id: &str) -> bool {
     let open_t = open_transition(id);
     let close_t = discharge_transition(id);
     let mut open = false;
     for ev in events {
+        if ev.run_id != run_id {
+            continue;
+        }
         if ev.transition == open_t {
             open = true;
         } else if ev.transition == close_t {
@@ -37,11 +45,11 @@ pub fn is_open(events: &[Event], id: &str) -> bool {
     open
 }
 
-/// Of the `required` obligation ids, those still outstanding.
-pub fn outstanding(events: &[Event], required: &[String]) -> Vec<String> {
+/// Of the `required` obligation ids, those still outstanding within `run_id`.
+pub fn outstanding(events: &[Event], required: &[String], run_id: &str) -> Vec<String> {
     required
         .iter()
-        .filter(|id| is_open(events, id))
+        .filter(|id| is_open(events, id, run_id))
         .cloned()
         .collect()
 }
@@ -51,9 +59,9 @@ mod tests {
     use super::*;
     use crate::event::Decision;
 
-    fn ev(transition: &str) -> Event {
+    fn ev_run(transition: &str, run_id: &str) -> Event {
         Event {
-            run_id: "r".into(),
+            run_id: run_id.into(),
             task_id: None,
             parent_task_id: None,
             action_id: "a".into(),
@@ -69,13 +77,17 @@ mod tests {
         }
     }
 
+    fn ev(transition: &str) -> Event {
+        ev_run(transition, "r")
+    }
+
     #[test]
     fn edit_opens_then_validation_discharges() {
         let id = "require-validation";
         let mut events = vec![ev(&open_transition(id))];
-        assert!(is_open(&events, id));
+        assert!(is_open(&events, id, "r"));
         events.push(ev(&discharge_transition(id)));
-        assert!(!is_open(&events, id));
+        assert!(!is_open(&events, id, "r"));
     }
 
     #[test]
@@ -86,7 +98,7 @@ mod tests {
             ev(&discharge_transition(id)),
             ev(&open_transition(id)),
         ];
-        assert!(is_open(&events, id));
+        assert!(is_open(&events, id, "r"));
     }
 
     #[test]
@@ -94,8 +106,21 @@ mod tests {
         let events = vec![ev(&open_transition("require-validation"))];
         let required = vec!["require-validation".to_string(), "other".to_string()];
         assert_eq!(
-            outstanding(&events, &required),
+            outstanding(&events, &required, "r"),
             vec!["require-validation".to_string()]
         );
+    }
+
+    #[test]
+    fn one_runs_discharge_does_not_clear_anothers_obligation() {
+        let id = "require-validation";
+        // Run A opens the obligation; run B discharges its own.
+        let events = vec![
+            ev_run(&open_transition(id), "run-A"),
+            ev_run(&discharge_transition(id), "run-B"),
+        ];
+        // Run A is still on the hook; run B has nothing outstanding.
+        assert!(is_open(&events, id, "run-A"));
+        assert!(!is_open(&events, id, "run-B"));
     }
 }

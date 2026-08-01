@@ -98,13 +98,17 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
         })
         .collect();
 
-    let mut patterns: Vec<String> = compiled
-        .composition
-        .patterns()
+    let mut kinds: Vec<_> = compiled.composition.patterns().into_iter().collect();
+    kinds.sort_by_key(|p| p.to_string());
+    let patterns: Vec<Value> = kinds
         .iter()
-        .map(|p| p.to_string())
+        .map(|p| {
+            json!({
+                "name": p.to_string(),
+                "enforcement": spec::default_enforcement_level(*p).as_str(),
+            })
+        })
         .collect();
-    patterns.sort();
 
     let gate = spec.bindings.gate.as_ref().map(|g| {
         json!({
@@ -213,7 +217,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         out.push(GenFile {
             path: "hooks/approve_commit.sh".to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding (per run).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\"{requires}\n",
                 header = prov.hash_header(),
             ),
         });

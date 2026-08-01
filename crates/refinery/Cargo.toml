@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 spec = { workspace = true }
 kernel = { workspace = true }
 

@@ -90,7 +90,7 @@ rolls the live tree back to a retained, self-verified bundle version.
 | [`spec`](crates/spec) | Front-end: metamodel, composition parser, resolved graph, checker |
 | [`harnessc`](crates/harnessc) | Back-ends (claude-code, portable): generate the Playbook, stamp provenance |
 | [`harness-kernel`](crates/kernel) | Runtime kernel: packets, guards, gates, ledger, signatures, identity |
-| [`refinery`](crates/refinery) | Reads the Ledger, proposes reviewable spec changes |
+| [`refinery`](crates/refinery) | Reads the Ledger, proposes reviewable spec changes, promotes approved ones under Gate revalidation |
 
 The front-end knows nothing about any platform; the same spec compiles to
 multiple targets.

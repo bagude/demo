@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # GENERATED FROM: harness.patterns.yaml
 # SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
-# PLAYBOOK: sha256:be55f60fa4119d249a67fa5f7f1706fb2f92af25a5680404340a6f3e5fef92a1
+# PLAYBOOK: sha256:068bfaa3a47d1990afae38f98ed0ff1f3ecf66061c26ea8501cbe6c467bd1c96
 # GENERATOR: harnessc 0.1.0
 # DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 # Gate: block `git commit` while a required obligation is outstanding, each
 # at its declared scope. Every commit evaluation is recorded to the Ledger.
 set -euo pipefail
-exec "${KERNEL_BIN:-kernel}" pre-commit --ledger "evidence/events.jsonl" --run-id "${CLAUDE_SESSION_ID:-unknown}" --playbook-ref "sha256:be55f60fa4119d249a67fa5f7f1706fb2f92af25a5680404340a6f3e5fef92a1" --packet "${INTAKE_ACTIVE_PACKET:-tasks/active.json}" --require require-validation:run
+exec "${KERNEL_BIN:-kernel}" pre-commit --ledger "evidence/events.jsonl" --run-id "${CLAUDE_SESSION_ID:-unknown}" --playbook-ref "sha256:068bfaa3a47d1990afae38f98ed0ff1f3ecf66061c26ea8501cbe6c467bd1c96" --packet "${INTAKE_ACTIVE_PACKET:-tasks/active.json}" --require require-validation:run

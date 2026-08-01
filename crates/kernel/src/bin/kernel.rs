@@ -1460,32 +1460,16 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                                     re-verify it"
                             .into());
                     };
-                    let Some(evidence) = &approval.approver.evidence else {
-                        return refuse(
-                            "gate refused: signature-authenticated approval carries no \
-                             signature evidence"
-                                .to_string(),
-                        );
-                    };
-                    // The approver is resolved through the CURRENT registry:
-                    // a principal revoked since approval is refused here,
-                    // which is exactly what revocation means.
-                    let public = match approver_key(
+                    // One canonical composition of this check, shared with the
+                    // Refinery's promotion path (see sign::reverify_signed_approval):
+                    // the approver is resolved through the CURRENT registry, so a
+                    // principal revoked since approval is refused here.
+                    if let Err(e) = kernel::sign::reverify_signed_approval(
+                        &cp,
                         trusted_keys,
                         authority.as_deref(),
-                        &approval.approver.principal,
+                        &now_rfc3339(),
                     ) {
-                        Ok(k) => k,
-                        Err(e) => {
-                            return refuse(format!("gate refused: {e}"));
-                        }
-                    };
-                    let message = kernel::sign::approval_message(
-                        &cp,
-                        &approval.preconditions,
-                        approval.expiry.as_deref(),
-                    );
-                    if let Err(e) = kernel::sign::verify(&public, &message, evidence) {
                         return refuse(format!("gate refused: {e}"));
                     }
                 }

@@ -18,6 +18,19 @@ use std::path::{Path, PathBuf};
 
 use kernel::event::{Decision, Event};
 
+pub mod promote;
+
+/// A content digest in the workspace's `sha256:<hex>` convention.
+pub fn sha256_ref(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut s = String::from("sha256:");
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 /// A candidate lesson extracted from operational state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lesson {
@@ -84,6 +97,16 @@ pub struct Proposal {
     pub disputed: Vec<Candidate>,
     pub proposal_md: String,
     pub diff: String,
+    /// Digest of the live spec this analysis ran against. Promotion refuses a
+    /// proposal whose base has since moved — a proposal is an edit *of a
+    /// particular spec*, not a floating patch.
+    pub base_spec_ref: String,
+    /// Digest of `proposed_spec` as the Refinery authored it. A human may
+    /// legitimately hand-edit the proposed file before seeking approval (that
+    /// is how disputed changes get promoted); the approval then binds the
+    /// edited bytes, and promotion records that the bytes differ from what
+    /// was authored.
+    pub authored_ref: String,
 }
 
 impl Proposal {
@@ -166,6 +189,8 @@ pub fn analyze(spec_text: &str, events: &[Event]) -> Result<Proposal, String> {
     let diff = render_diff(&applied, &disputed);
     let id = proposal_id(spec_text, events);
     let proposal_md = render_proposal_md(&model.harness.name, &lessons, &applied, &disputed);
+    let base_spec_ref = sha256_ref(spec_text.as_bytes());
+    let authored_ref = sha256_ref(proposed_spec.as_bytes());
 
     Ok(Proposal {
         id,
@@ -175,6 +200,8 @@ pub fn analyze(spec_text: &str, events: &[Event]) -> Result<Proposal, String> {
         disputed,
         proposal_md,
         diff,
+        base_spec_ref,
+        authored_ref,
     })
 }
 
@@ -403,10 +430,19 @@ pub fn write_proposal(
     let dir = proposals_root.join(&proposal.id);
     std::fs::create_dir_all(&dir)?;
 
+    let manifest = promote::ProposalManifest {
+        id: proposal.id.clone(),
+        base_spec_ref: proposal.base_spec_ref.clone(),
+        authored_ref: proposal.authored_ref.clone(),
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
     let files = [
         ("harness.patterns.proposed.yaml", &proposal.proposed_spec),
         ("changes.diff", &proposal.diff),
         ("PROPOSAL.md", &proposal.proposal_md),
+        ("proposal.json", &manifest_json),
     ];
 
     let spec_canon = canonical(spec_path);

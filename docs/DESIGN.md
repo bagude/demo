@@ -583,10 +583,26 @@ left no Ledger trace at all; now `gate request` records the halt
 (`proposed`), `gate approve` records the decision (`authorized`, approved
 *or* rejected), and `gate verify` records every resume — including each
 refusal, with its reason as an evidence ref, so a tampered-action rejection
-is a first-class chained record and not just an exit code. Remaining on
-this arc: an **online IdP protocol adapter**
+is a first-class chained record and not just an exit code. The Refinery's
+loop is now **closed by gated promotion**: `refinery promote` applies an
+approved proposal to the live spec only as a Gate resume — the checkpoint's
+`action_hash` must equal the digest of the proposal's bytes *as they are
+now* (a post-approval edit is the same `action changed` refusal as a
+substituted deploy artifact), the proposal's manifest binds the base spec
+it was analyzed against (a moved spec makes the proposal stale, never
+silently overwritten), and by default only a signature-authenticated
+approval promotes — re-proved through the current identity registry via
+the *same* kernel composition `gate verify` uses
+(`sign::reverify_signed_approval`, one canonical implementation so the two
+resume paths cannot drift), with `Claimed`/`Token` approvals requiring an
+explicit `--allow-unproven`. A hand-edited proposal is legitimate — that
+is how disputed changes get promoted — but the edit is recorded as
+evidence, and both `propose` and `promote` (success *and* refusal, with
+reason) land in the Ledger at their protocol stages. Promotion proves the
+bytes parse, not that they compile: the compile gate stays `harnessc
+build`, whose freshness test makes a promoted-but-uncompiled spec loud in
+CI. Remaining on this arc: an **online IdP protocol adapter**
 (OIDC issuance, directory sync) binding the identity authority itself to
 organizational infrastructure — the offline trust core (authority-signed
-registries with expiry and revocation) exists; a
-**Python/OpenAI-Agents** back-end behind the same `Binding`; and
-version-promotion tooling for approved Refinery proposals.
+registries with expiry and revocation) exists; and a
+**Python/OpenAI-Agents** back-end behind the same `Binding`.

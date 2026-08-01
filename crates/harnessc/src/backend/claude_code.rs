@@ -502,19 +502,9 @@ fn ports_manifest(prov: &Prov, ports: &[PortBinding]) -> GenFile {
 /// version, spec digest, composition, and every bound pattern.
 fn playbook_manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     let spec = &compiled.spec;
-    let mut kinds: Vec<_> = compiled.composition.patterns().into_iter().collect();
-    kinds.sort_by_key(|p| p.to_string());
-    // Each pattern with its honest enforcement level (claude-code uses the
-    // shared default map).
-    let patterns: Vec<Value> = kinds
-        .iter()
-        .map(|p| {
-            json!({
-                "name": p.to_string(),
-                "enforcement": spec::default_enforcement_level(*p).as_str(),
-            })
-        })
-        .collect();
+    // Derived from the resolved architecture, not surface presence: a Law
+    // activated through a `uses` edge or `always_on` is in the system.
+    let patterns = crate::common::pattern_inventory(compiled, &ClaudeCode);
     prov.json_file(
         "harness/playbook.json",
         json!({

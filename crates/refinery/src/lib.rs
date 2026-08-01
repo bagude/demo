@@ -42,21 +42,54 @@ pub enum Change {
     },
 }
 
-/// A complete proposal: lessons, the proposed spec text, and a diff.
+/// The ratchet classification of a proposed change.
+///
+/// **The ratchet** (constitution §14): *automatic promotion is permitted only
+/// for transformations proven monotone under a predeclared, mechanically
+/// decidable policy ordering.* Everything else — authority widening, constraint
+/// relaxation, ambiguous restriction, or a cross-policy tradeoff — stays a
+/// reviewable proposal requiring human promotion.
+///
+/// The ordering declared here is deliberately small and total:
+/// - **Monotone (auto):** administrative changes with no semantic policy effect
+///   (a version bump).
+/// - **Disputed (human):** everything that touches a policy — including changes
+///   that *look* like strengthening but are cross-policy (adding redaction
+///   trades secrecy against audit evidence; a shorter timeout trades latency
+///   against partial operations). When in doubt, Disputed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Monotone,
+    Disputed,
+}
+
+/// A proposed change together with its ratchet classification and rationale.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub change: Change,
+    pub direction: Direction,
+    pub rationale: String,
+}
+
+/// A complete proposal: lessons, the monotone changes actually applied, the
+/// disputed changes left for a human, the proposed spec text, and a diff.
 #[derive(Debug, Clone)]
 pub struct Proposal {
     pub id: String,
     pub lessons: Vec<Lesson>,
     pub proposed_spec: String,
+    /// Monotone changes — applied to `proposed_spec` automatically.
     pub changes: Vec<Change>,
+    /// Disputed changes — surfaced for human promotion, NOT applied.
+    pub disputed: Vec<Candidate>,
     pub proposal_md: String,
     pub diff: String,
 }
 
 impl Proposal {
-    /// Whether the proposal actually changes anything.
+    /// Whether the proposal actually contains anything.
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty() && self.lessons.is_empty()
+        self.changes.is_empty() && self.disputed.is_empty() && self.lessons.is_empty()
     }
 }
 
@@ -65,7 +98,8 @@ pub fn analyze(spec_text: &str, events: &[Event]) -> Result<Proposal, String> {
     let model = spec::parse_model(spec_text).map_err(|e| e.to_string())?;
 
     let mut lessons = Vec::new();
-    let mut changes = Vec::new();
+    let mut applied: Vec<Change> = Vec::new();
+    let mut disputed: Vec<Candidate> = Vec::new();
     let lines: Vec<String> = spec_text.lines().map(String::from).collect();
 
     // --- Lesson: frequently denied paths (manual review; never auto-widen) ---
@@ -75,8 +109,8 @@ pub fn analyze(spec_text: &str, events: &[Event]) -> Result<Proposal, String> {
                 title: format!("path '{path}' denied {count}×"),
                 detail: format!(
                     "The Guard blocked writes to '{path}' {count} times. If packets legitimately \
-                     need it, add it to their file scope. The Refinery will NOT widen a Guard \
-                     automatically — this is a human decision."
+                     need it, add it to their file scope. Widening a Guard is authority widening — \
+                     the ratchet never auto-promotes it; this is a human decision."
                 ),
                 auto_applied: false,
             });
@@ -96,37 +130,49 @@ pub fn analyze(spec_text: &str, events: &[Event]) -> Result<Proposal, String> {
         });
     }
 
-    // --- Auto-strengthen: harden ledger redaction if it can leak context ---
+    // --- DISPUTED: harden ledger redaction.
+    // Adding redaction *looks* like strengthening, but the constitution names it
+    // a cross-policy tradeoff (secrecy vs. required audit evidence). The ratchet
+    // therefore refuses to auto-promote it — it becomes a human proposal.
     if let Some(ledger) = &model.bindings.ledger {
         if !events.is_empty() && !ledger.redact.iter().any(|r| r == "raw_model_context") {
             if let Some(change) = harden_redaction(&lines) {
-                changes.push(change);
+                let rationale = "adding 'raw_model_context' to redaction trades secrecy against \
+                    audit evidence — a cross-policy change the ratchet cannot classify as monotone, \
+                    so it requires human promotion"
+                    .to_string();
                 lessons.push(Lesson {
-                    title: "harden ledger redaction".into(),
-                    detail: "The ledger has entries but does not redact 'raw_model_context'. Added \
-                             it so the ledger stays to decision products. (Strengthening — applied.)"
-                        .into(),
-                    auto_applied: true,
+                    title: "harden ledger redaction (proposed, not applied)".into(),
+                    detail: rationale.clone(),
+                    auto_applied: false,
+                });
+                disputed.push(Candidate {
+                    change,
+                    direction: Direction::Disputed,
+                    rationale,
                 });
             }
         }
     }
 
-    // --- Auto: bump the harness version as a promotion candidate ---
+    // --- MONOTONE: bump the harness version.
+    // Administrative, no semantic policy effect — provably safe under the
+    // declared ordering, so it is applied automatically as a promotion marker.
     if let Some(change) = bump_version(&lines) {
-        changes.push(change);
+        applied.push(change);
     }
 
-    let proposed_spec = apply_changes(&lines, &changes);
-    let diff = render_diff(&changes);
+    let proposed_spec = apply_changes(&lines, &applied);
+    let diff = render_diff(&applied, &disputed);
     let id = proposal_id(spec_text, events);
-    let proposal_md = render_proposal_md(&model.harness.name, &lessons, &changes);
+    let proposal_md = render_proposal_md(&model.harness.name, &lessons, &applied, &disputed);
 
     Ok(Proposal {
         id,
         lessons,
         proposed_spec,
-        changes,
+        changes: applied,
+        disputed,
         proposal_md,
         diff,
     })
@@ -245,22 +291,39 @@ fn apply_changes(lines: &[String], changes: &[Change]) -> String {
     text
 }
 
-fn render_diff(changes: &[Change]) -> String {
+fn render_change_hunk(change: &Change) -> String {
+    match change {
+        Change::Replace { line, old, new } => {
+            format!("@@ line {} @@\n-{old}\n+{new}\n", line + 1)
+        }
+        Change::Insert { after_line, new } => {
+            format!("@@ after line {} @@\n+{new}\n", after_line + 1)
+        }
+    }
+}
+
+fn render_diff(applied: &[Change], disputed: &[Candidate]) -> String {
     let mut s = String::from("--- harness.patterns.yaml\n+++ harness.patterns.proposed.yaml\n");
-    for change in changes {
-        match change {
-            Change::Replace { line, old, new } => {
-                s.push_str(&format!("@@ line {} @@\n-{old}\n+{new}\n", line + 1));
-            }
-            Change::Insert { after_line, new } => {
-                s.push_str(&format!("@@ after line {} @@\n+{new}\n", after_line + 1));
-            }
+    s.push_str("# APPLIED (monotone — auto-promoted)\n");
+    for change in applied {
+        s.push_str(&render_change_hunk(change));
+    }
+    if !disputed.is_empty() {
+        s.push_str("\n# DISPUTED (NOT applied — requires human promotion)\n");
+        for c in disputed {
+            s.push_str(&format!("# {}\n", c.rationale));
+            s.push_str(&render_change_hunk(&c.change));
         }
     }
     s
 }
 
-fn render_proposal_md(harness: &str, lessons: &[Lesson], changes: &[Change]) -> String {
+fn render_proposal_md(
+    harness: &str,
+    lessons: &[Lesson],
+    applied: &[Change],
+    disputed: &[Candidate],
+) -> String {
     let mut s = String::new();
     s.push_str(&format!("# Refinery proposal for `{harness}`\n\n"));
     s.push_str(
@@ -285,14 +348,27 @@ fn render_proposal_md(harness: &str, lessons: &[Lesson], changes: &[Change]) -> 
         s.push('\n');
     }
 
-    s.push_str("## Proposed spec changes\n\n");
-    if changes.is_empty() {
-        s.push_str("_None._\n");
+    s.push_str("## Applied automatically (monotone under the ratchet)\n\n");
+    if applied.is_empty() {
+        s.push_str("_None._\n\n");
     } else {
         s.push_str(&format!(
-            "{} change(s); see `changes.diff`.\n",
-            changes.len()
+            "{} change(s) applied to `harness.patterns.proposed.yaml`.\n\n",
+            applied.len()
         ));
+    }
+
+    s.push_str("## Requires human promotion (disputed)\n\n");
+    if disputed.is_empty() {
+        s.push_str("_None._\n");
+    } else {
+        s.push_str(
+            "These changes were withheld by the ratchet because their effect is not provably \
+             monotone. Review and apply by hand if appropriate:\n\n",
+        );
+        for c in disputed {
+            s.push_str(&format!("- {}\n", c.rationale));
+        }
     }
     s
 }
@@ -379,6 +455,8 @@ mod tests {
             output_refs: vec![],
             decision,
             evidence_refs: vec![],
+            playbook_ref: None,
+            attempt_id: None,
         }
     }
 
@@ -408,15 +486,34 @@ mod tests {
     }
 
     #[test]
-    fn hardens_redaction_when_missing() {
+    fn redaction_hardening_is_disputed_not_applied() {
+        // The constitution's ratchet names added redaction a cross-policy
+        // tradeoff (secrecy vs. audit evidence). It must be proposed, not applied.
         let weakened = SPEC.replace("      - raw_model_context\n", "");
         let events = vec![ev("pre_tool.edit", Decision::Allowed, Some("src/lib.rs"))];
         let proposal = analyze(&weakened, &events).unwrap();
-        assert!(proposal.proposed_spec.contains("raw_model_context"));
+
+        // NOT applied to the proposed spec...
+        assert!(!proposal.proposed_spec.contains("raw_model_context"));
+        // ...and surfaced as a disputed change for a human.
+        assert!(proposal
+            .disputed
+            .iter()
+            .any(|c| c.direction == Direction::Disputed));
         assert!(proposal
             .lessons
             .iter()
-            .any(|l| l.auto_applied && l.title.contains("redaction")));
+            .any(|l| !l.auto_applied && l.title.contains("redaction")));
+    }
+
+    #[test]
+    fn only_monotone_changes_are_applied() {
+        let weakened = SPEC.replace("      - raw_model_context\n", "");
+        let events = vec![ev("pre_tool.edit", Decision::Allowed, Some("src/lib.rs"))];
+        let proposal = analyze(&weakened, &events).unwrap();
+        // The one auto-applied change is the administrative version bump.
+        assert_eq!(proposal.changes.len(), 1);
+        assert!(proposal.proposed_spec.contains("version: 0.1.1"));
     }
 
     #[test]

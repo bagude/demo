@@ -97,6 +97,12 @@ pub struct TaskPacket {
     pub submitted_by: String,
     #[serde(default)]
     pub priority: Priority,
+    /// Explicit, auditable grant to amend enforcement artifacts (hooks,
+    /// settings, kernel, the spec). A packet must set this *and* list the
+    /// protected path in its write scope before the Guard will allow such an
+    /// edit — enforcement is never an ambient capability. Default: false.
+    #[serde(default)]
+    pub amends_enforcement: bool,
 }
 
 impl TaskPacket {
@@ -198,6 +204,7 @@ mod tests {
             acceptance_criteria: vec!["x".into()],
             submitted_by: "me".into(),
             priority: Priority::Medium,
+            amends_enforcement: false,
         };
         assert!(packet.authorizes_write("src/lib.rs"));
         assert!(packet.authorizes_write("docs/guide.md"));
@@ -215,6 +222,7 @@ mod tests {
             acceptance_criteria: vec!["x".into()],
             submitted_by: "me".into(),
             priority: Priority::Medium,
+            amends_enforcement: false,
         };
         assert!(!packet.authorizes_write("src/lib.rs"));
     }
@@ -229,6 +237,7 @@ mod tests {
             acceptance_criteria: vec!["x".into()],
             submitted_by: "me".into(),
             priority: Priority::Medium,
+            amends_enforcement: false,
         };
         assert_eq!(content_hash(&mk()), content_hash(&mk()));
 

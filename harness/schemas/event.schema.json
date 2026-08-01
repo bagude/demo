@@ -13,6 +13,9 @@
     "actor": {
       "type": "string"
     },
+    "attempt_id": {
+      "type": "string"
+    },
     "decision": {
       "enum": [
         "allowed",
@@ -41,6 +44,9 @@
       "type": "array"
     },
     "parent_task_id": {
+      "type": "string"
+    },
+    "playbook_ref": {
       "type": "string"
     },
     "run_id": {

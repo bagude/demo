@@ -7,4 +7,5 @@
 set -euo pipefail
 exec "${KERNEL_BIN:-kernel}" post-tool \
   --ledger "evidence/events.jsonl" \
-  --run-id "${CLAUDE_SESSION_ID:-unknown}"
+  --run-id "${CLAUDE_SESSION_ID:-unknown}" \
+  --playbook-ref "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"

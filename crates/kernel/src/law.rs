@@ -47,6 +47,79 @@ pub fn enforce_file_scope(packet: &TaskPacket, path: &str) -> LawDecision {
     }
 }
 
+/// The Guard verdict including the self-protection outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enforcement {
+    /// Ordinary in-scope write.
+    Allow,
+    /// An in-scope write to a protected enforcement artifact, explicitly
+    /// granted via `amends_enforcement` — allowed, but recorded distinctly.
+    AllowAmendment,
+    /// Rejected, with a reason.
+    Deny(String),
+}
+
+/// Whether `path` is a protected enforcement artifact.
+///
+/// `protected` holds path prefixes (a trailing `/` means a directory grant),
+/// matched with the same semantics as a packet's write scope.
+pub fn is_protected(protected: &[String], path: &str) -> bool {
+    protected
+        .iter()
+        .any(|p| crate::packet::path_matches(p, path))
+}
+
+/// Full Guard evaluation with self-protection (constitution §4, self-protection
+/// property).
+///
+/// Enforcement artifacts are default-deny like everything else, but editing one
+/// *additionally* requires the packet to carry an explicit `amends_enforcement`
+/// grant. A denylist that must remember to name protected paths is the
+/// anti-pattern this replaces: here, protection rides on the same default-deny
+/// allowlist, and amendment is never an ambient capability.
+pub fn enforce(packet: &TaskPacket, path: &str, protected: &[String]) -> Enforcement {
+    let in_scope = packet.authorizes_write(path);
+    if is_protected(protected, path) {
+        if in_scope && packet.amends_enforcement {
+            Enforcement::AllowAmendment
+        } else if in_scope {
+            Enforcement::Deny(format!(
+                "'{path}' is an enforcement artifact; editing it requires a task packet with \
+                 amends_enforcement = true (an explicit, auditable grant at Intake)"
+            ))
+        } else {
+            Enforcement::Deny(format!(
+                "'{path}' is a protected enforcement artifact and is not in the packet's write scope"
+            ))
+        }
+    } else if in_scope {
+        Enforcement::Allow
+    } else {
+        Enforcement::Deny(format!(
+            "'{path}' is not in the write scope of task packet '{}'; only files the packet lists \
+             with access = \"write\" may be edited",
+            packet.title
+        ))
+    }
+}
+
+/// If a Bash command performs a destructive operation touching a protected
+/// path, return that path. Closes the hole where `rm harness/hooks/…` would
+/// bypass the edit-only Guard. Heuristic (documented): a destructive verb or
+/// output redirection plus a reference to a protected prefix.
+pub fn bash_hits_protected(command: &str, protected: &[String]) -> Option<String> {
+    const DESTRUCTIVE: &[&str] = &["rm", "rmdir", "mv", "truncate", "dd", "tee", "shred"];
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let destructive = tokens.iter().any(|t| DESTRUCTIVE.contains(t)) || command.contains('>');
+    if !destructive {
+        return None;
+    }
+    protected
+        .iter()
+        .find(|p| command.contains(p.trim_end_matches('/')))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +137,7 @@ mod tests {
             acceptance_criteria: vec!["ok".into()],
             submitted_by: "me".into(),
             priority: Priority::Medium,
+            amends_enforcement: false,
         }
     }
 
@@ -82,5 +156,52 @@ mod tests {
     #[test]
     fn denies_an_unlisted_path() {
         assert!(!enforce_file_scope(&packet(), "src/secret.rs").is_allowed());
+    }
+
+    const PROTECTED: &[&str] = &["harness.patterns.yaml", ".claude/", "harness/"];
+
+    fn protected() -> Vec<String> {
+        PROTECTED.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn protected_artifact_denied_even_when_in_scope_without_grant() {
+        // A packet that scopes an enforcement artifact but lacks the grant.
+        let mut p = packet();
+        p.files.push(FileScope::write(".claude/settings.json"));
+        let d = enforce(&p, ".claude/settings.json", &protected());
+        assert!(matches!(d, Enforcement::Deny(_)));
+    }
+
+    #[test]
+    fn protected_artifact_allowed_as_amendment_with_explicit_grant() {
+        let mut p = packet();
+        p.files.push(FileScope::write(".claude/settings.json"));
+        p.amends_enforcement = true;
+        assert_eq!(
+            enforce(&p, ".claude/settings.json", &protected()),
+            Enforcement::AllowAmendment
+        );
+    }
+
+    #[test]
+    fn ordinary_path_unaffected_by_protection() {
+        assert_eq!(
+            enforce(&packet(), "src/lib.rs", &protected()),
+            Enforcement::Allow
+        );
+    }
+
+    #[test]
+    fn bash_rm_of_a_hook_is_detected() {
+        let hit = bash_hits_protected("rm -f harness/hooks/enforce_file_scope.sh", &protected());
+        assert_eq!(hit.as_deref(), Some("harness/"));
+    }
+
+    #[test]
+    fn innocuous_bash_is_not_flagged() {
+        assert!(bash_hits_protected("ls -la src/", &protected()).is_none());
+        // reading a protected file is fine; only destructive ops are flagged
+        assert!(bash_hits_protected("cat harness/README.md", &protected()).is_none());
     }
 }

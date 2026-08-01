@@ -16,6 +16,16 @@ use crate::common::{
 
 /// The commit-boundary hook path (the Gate's enforcement point).
 const APPROVE_COMMIT_HOOK: &str = "harness/hooks/approve_commit.sh";
+/// The Bash self-protection hook path.
+const PROTECT_HOOK: &str = "harness/hooks/protect_enforcement.sh";
+/// The file listing protected enforcement-artifact prefixes.
+const PROTECTED_FILE: &str = "harness/enforcement.protected";
+
+/// Enforcement artifacts protected from ambient amendment (constitution §4).
+/// These are the paths a compiled claude-code Playbook writes, plus the spec.
+fn protected_prefixes() -> [&'static str; 3] {
+    ["harness.patterns.yaml", ".claude/", "harness/"]
+}
 
 pub struct ClaudeCode;
 
@@ -54,6 +64,7 @@ impl Backend for ClaudeCode {
         }
         files.extend(schema_files(&prov, spec));
         files.extend(hook_files(&prov, spec));
+        files.push(protected_file(&prov));
         if let Some(gate) = &spec.bindings.gate {
             files.push(gate_file(&prov, gate));
         }
@@ -108,7 +119,8 @@ fn claude_md(prov: &Prov, spec: &SpecFile) -> GenFile {
         for law in &spec.bindings.laws {
             let enforcement = match law.id.as_str() {
                 "enforce-file-scope" => {
-                    "**enforced** — the kernel blocks edits outside the packet's write scope"
+                    "**enforced** — the kernel blocks edits outside the packet's write scope; \
+                     enforcement artifacts additionally require an explicit `amends_enforcement` grant"
                 }
                 "require-validation" => {
                     "**enforced via the Gate** — recorded after each edit and required clear before commit"
@@ -182,13 +194,13 @@ fn settings_json(prov: &Prov, spec: &SpecFile) -> GenFile {
         }
     }
 
-    // The commit Gate is a pre-tool interceptor on Bash.
+    // Bash pre-tool interceptors: self-protection always, plus the commit Gate
+    // when the harness has obligations to discharge.
+    let mut bash_hooks = vec![json!({ "type": "command", "command": PROTECT_HOOK })];
     if !gate_obligations(spec).is_empty() {
-        pre.push(json!({
-            "matcher": "Bash",
-            "hooks": [ { "type": "command", "command": APPROVE_COMMIT_HOOK } ]
-        }));
+        bash_hooks.push(json!({ "type": "command", "command": APPROVE_COMMIT_HOOK }));
     }
+    pre.push(json!({ "matcher": "Bash", "hooks": bash_hooks }));
 
     let mut hooks = serde_json::Map::new();
     if !pre.is_empty() {
@@ -241,12 +253,15 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         let path = hook_path(law);
         let body = match law.id.as_str() {
             "enforce-file-scope" => format!(
-                "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\"\n",
+                "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope\n# (and protect enforcement artifacts unless amends_enforcement is granted).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --protected \"{protected}\"\n",
                 header = prov.hash_header(),
+                playbook = prov.spec_hash,
+                protected = PROTECTED_FILE,
             ),
             "require-validation" => format!(
-                "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\"\n",
+                "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\"\n",
                 header = prov.hash_header(),
+                playbook = prov.spec_hash,
             ),
             other => format!(
                 "#!/usr/bin/env bash\n{header}# Law '{other}' has no kernel binding.\necho 'law {other} is not implemented by the kernel' >&2\nexit 1\n",
@@ -274,7 +289,35 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
             ),
         });
     }
+
+    // Bash self-protection hook: block destructive commands against enforcement
+    // artifacts unless the active packet grants amends_enforcement.
+    out.push(GenFile {
+        path: PROTECT_HOOK.to_string(),
+        content: format!(
+            "#!/usr/bin/env bash\n{header}# Self-protection: block `rm`/`mv`/redirect against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --protected \"{protected}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\"\n",
+            header = prov.hash_header(),
+            protected = PROTECTED_FILE,
+            playbook = prov.spec_hash,
+        ),
+    });
     out
+}
+
+fn protected_file(prov: &Prov) -> GenFile {
+    let mut body = prov.hash_header();
+    body.push_str("# Protected enforcement artifacts. A write to any of these requires a task\n");
+    body.push_str(
+        "# packet with amends_enforcement = true (an explicit, auditable Intake grant).\n",
+    );
+    for p in protected_prefixes() {
+        body.push_str(p);
+        body.push('\n');
+    }
+    GenFile {
+        path: PROTECTED_FILE.to_string(),
+        content: body,
+    }
 }
 
 fn gate_file(prov: &Prov, gate: &GateBinding) -> GenFile {
@@ -312,7 +355,11 @@ fn harness_readme(prov: &Prov, spec_hash: &str) -> GenFile {
            edit, and `approve_commit.sh` blocks `git commit` (exit 2) until it is discharged by the \
            validation step.\n\
          - The `Gate` checkpoint, approval binding, and precondition revalidation are enforced by \
-           the kernel's `gate` subcommands.\n\n\
+           the kernel's `gate` subcommands.\n\
+         - **Self-protection**: the enforcement artifacts listed in `enforcement.protected` \
+           (this tree and the spec) are default-deny like everything else; editing one requires a \
+           packet with `amends_enforcement = true`, and `protect_enforcement.sh` blocks a `rm`/`mv` \
+           of them via Bash. Amending enforcement is never an ambient capability.\n\n\
          Nothing here claims a guarantee the kernel does not provide.\n",
     );
     GenFile {
@@ -399,6 +446,28 @@ mod tests {
         let hook = &find(&g, APPROVE_COMMIT_HOOK).content;
         assert!(hook.contains("pre-commit"));
         assert!(hook.contains("--require require-validation"));
+    }
+
+    #[test]
+    fn emits_protected_set_and_self_protection_hook() {
+        let g = build();
+        let protected = &find(&g, PROTECTED_FILE).content;
+        assert!(protected.contains("harness.patterns.yaml"));
+        assert!(protected.contains(".claude/"));
+        assert!(protected.contains("harness/"));
+
+        let hook = &find(&g, PROTECT_HOOK).content;
+        assert!(hook.contains("pre-bash"));
+        assert!(hook.contains("--protected"));
+
+        // The guard hook consults the protected set.
+        assert!(find(&g, "harness/hooks/enforce_file_scope.sh")
+            .content
+            .contains("--protected"));
+        // The Bash matcher is registered in settings.
+        assert!(find(&g, ".claude/settings.json")
+            .content
+            .contains("protect_enforcement.sh"));
     }
 
     #[test]

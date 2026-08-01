@@ -162,7 +162,8 @@ pub fn task_packet_schema() -> Value {
             },
             "acceptance_criteria": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
             "submitted_by": { "type": "string", "minLength": 1 },
-            "priority": { "enum": ["low", "medium", "high", "critical"], "default": "medium" }
+            "priority": { "enum": ["low", "medium", "high", "critical"], "default": "medium" },
+            "amends_enforcement": { "type": "boolean", "default": false }
         }
     })
 }
@@ -215,7 +216,9 @@ pub fn event_schema() -> Value {
             "input_refs": { "type": "array", "items": { "type": "string" } },
             "output_refs": { "type": "array", "items": { "type": "string" } },
             "decision": { "enum": ["allowed", "denied", "approved", "rejected", "recorded"] },
-            "evidence_refs": { "type": "array", "items": { "type": "string" } }
+            "evidence_refs": { "type": "array", "items": { "type": "string" } },
+            "playbook_ref": { "type": "string" },
+            "attempt_id": { "type": "string" }
         }
     })
 }

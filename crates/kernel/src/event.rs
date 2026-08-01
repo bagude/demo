@@ -63,6 +63,23 @@ pub struct Event {
     /// References to supporting evidence artifacts.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
+    /// The Playbook (spec) content digest that governed this run — the run
+    /// binding. Lets the log prove which constitutional version was in force
+    /// for each event, essential for overnight Gates and historical replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playbook_ref: Option<String>,
+    /// One execution *attempt* of a logical action, distinct from `action_id`,
+    /// for replay safety across retries and resumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+}
+
+impl Event {
+    /// Set the run-binding digest (fluent; used by the CLI after construction).
+    pub fn with_playbook_ref(mut self, playbook_ref: Option<String>) -> Self {
+        self.playbook_ref = playbook_ref;
+        self
+    }
 }
 
 /// A handle to an append-only event log file (JSON lines).
@@ -136,6 +153,8 @@ mod tests {
             output_refs: vec![],
             decision,
             evidence_refs: vec![],
+            playbook_ref: Some("sha256:spec".into()),
+            attempt_id: None,
         }
     }
 
@@ -148,6 +167,15 @@ mod tests {
         let all = log.read_all().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[1].decision, Decision::Denied);
+    }
+
+    #[test]
+    fn playbook_ref_roundtrips_as_run_binding() {
+        let e = event(Decision::Allowed);
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"playbook_ref\":\"sha256:spec\""));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.playbook_ref.as_deref(), Some("sha256:spec"));
     }
 
     #[test]

@@ -1,9 +1,9 @@
 # patterns → harness compiler
 
-An executable form of *A Pattern Language for Agentic Composition*. Instead of
-configuring an agent with hand-written Markdown, you **declare** a harness in
-`harness.patterns.yaml` and **compile** it into a Claude Code Playbook backed by
-a trusted runtime kernel.
+An executable form of *A Pattern Language for Agentic Composition* (tracks
+constitution **v1.2**). Instead of configuring an agent with hand-written
+Markdown, you **declare** a harness in `harness.patterns.yaml` and **compile** it
+into a Claude Code Playbook backed by a trusted runtime kernel.
 
 ```
 harness.patterns.yaml        (the spec — one system, declared)
@@ -104,6 +104,14 @@ The generated hooks are thin shims; the enforcement lives in the compiled
 - **`enforce-file-scope`** (Guard Law) — reads a proposed tool call on stdin and
   **blocks** (exit 2) any edit outside the active packet's write scope, logging
   the allow/deny to the Ledger.
+- **Self-protection** (§4) — the Guard is a default-deny allowlist, so it covers
+  its own enforcement artifacts (the generated tree and the spec, listed in
+  `enforcement.protected`). Editing one requires a packet with
+  `amends_enforcement: true` — logged distinctly as `pre_tool.enforcement_amendment` —
+  and a Bash hook blocks `rm`/`mv` of them. Amending enforcement is never ambient.
+- **Run binding** (§13) — every Ledger event carries `playbook_ref` (the spec
+  content digest that governed the run), so the log proves which constitutional
+  version was in force. The generated hooks bake in the digest they compiled from.
 - **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
   bind approval to an action hash + precondition snapshot + approver + expiry,
   and **revalidate at resume**: a changed action, drifted precondition, or
@@ -137,31 +145,45 @@ whatever target it compiles for:
   hook→event bindings plus the exact `kernel` command each hook runs. Same spec,
   same kernel, different packaging.
 
-## The Refinery
+## The Refinery and the ratchet
 
 `refinery` reads the Ledger and produces a **reviewable patch against the spec**,
 written under `refinery/proposals/<id>/` — never an edit to a generated artifact,
-never a hot-patch to the running system. It *strengthens* automatically (e.g.
-hardening redaction) but **never widens a Guard**: a frequently-denied path is
-surfaced as a manual-review lesson, not applied. Promotion — reviewing the diff
-and applying it to `harness.patterns.yaml` — is a separate human step, upholding
-the invariant that *the running agent never rewrites the rules governing its
-current run*.
+never a hot-patch to the running system.
+
+It obeys the **ratchet** (§14): *automatic promotion only for transformations
+proven monotone under a predeclared, mechanically-decidable ordering.* The
+ordering is small and total — an administrative version bump is monotone
+(auto-applied); everything that touches a policy is **disputed** and withheld for
+human promotion. That deliberately includes changes that *look* like
+strengthening: adding redaction is a cross-policy tradeoff (secrecy vs. audit
+evidence), so the Refinery proposes it but does **not** apply it. Widening a
+Guard is authority-widening and never auto-promoted. Promotion — reviewing the
+diff and applying it to `harness.patterns.yaml` — is a separate human step,
+upholding the invariant that *the running agent never rewrites the rules
+governing its current run*.
 
 ## Tests
 
 ```sh
-cargo test --workspace     # 63 tests: metamodel, checker rejections (incl.
+cargo test --workspace     # 71 tests: metamodel, checker rejections (incl.
                            # obligation-not-discharged), composition parser,
-                           # kernel enforcement, gate revalidation + obligations,
-                           # both backends, and the Refinery's no-touch guardrail
+                           # kernel enforcement + self-protection, gate
+                           # revalidation + obligations, playbook_ref run binding,
+                           # both backends, and the Refinery ratchet + guardrail
 ```
 
 ## Status and next steps
 
-This is the bootstrap carried through **Stage 3**: the obligation is discharged
-through the Gate, a second platform binding rides the same front-end, and the
-Refinery closes the loop from operational state to proposed memory. Natural
-continuations: a Python/OpenAI-Agents back-end behind the same `Binding`
-interface; richer obligation kinds; and version-promotion tooling that applies an
+This is the bootstrap carried through **Stage 3** and aligned to constitution
+**v1.2**: the obligation discharges through the Gate, a second platform binding
+rides the same front-end, the Refinery closes the loop under the ratchet, the
+Guard protects its own enforcement artifacts, and every Ledger event is bound to
+the spec version that governed it.
+
+Not yet modelled from v1.2 (patterns this bootstrap doesn't bind): Port replay
+safety (`attempt_id` is in the envelope but unused), Sandbox + Port external
+isolation, and Hive read/write-scope discipline. Natural continuations: a
+Python/OpenAI-Agents back-end behind the same `Binding`; the Port/Sandbox/Hive
+patterns with their v1.2 pairings; and version-promotion tooling that applies an
 approved Refinery proposal and recompiles.

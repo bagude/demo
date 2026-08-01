@@ -28,6 +28,7 @@
 //!     acceptance_criteria: vec!["Row count is unchanged after migrating".into()],
 //!     submitted_by: "alice".into(),
 //!     priority: Priority::High,
+//!     amends_enforcement: false,
 //! };
 //!
 //! let record = admit(&packet, "2026-07-31T00:00:00Z".into())
@@ -48,7 +49,7 @@ pub mod validate;
 pub use event::{Decision, Event, EventLog};
 pub use gate::{ApprovalBinding, Checkpoint, GateError, GateStore};
 pub use intake::{admit, AdmitError};
-pub use law::{enforce_file_scope, LawDecision};
+pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};
 pub use ledger::Ledger;
 pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
 pub use validate::{validate, Report, Violation};

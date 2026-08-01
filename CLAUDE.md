@@ -19,7 +19,7 @@ Work enters this system **only** as a typed task packet admitted through the Int
 
 ## Laws in force
 
-- `enforce-file-scope` (Guard at PreTool, applies to edit, write, delete): **enforced** — the kernel blocks edits outside the packet's write scope
+- `enforce-file-scope` (Guard at PreTool, applies to edit, write, delete): **enforced** — the kernel blocks edits outside the packet's write scope; enforcement artifacts additionally require an explicit `amends_enforcement` grant
 - `require-validation` (Obligation at PostTool, applies to edit, write): **enforced via the Gate** — recorded after each edit and required clear before commit
 
 ## Gate

@@ -64,6 +64,8 @@ mod tests {
             output_refs: vec![],
             decision: Decision::Recorded,
             evidence_refs: vec![],
+            playbook_ref: None,
+            attempt_id: None,
         }
     }
 

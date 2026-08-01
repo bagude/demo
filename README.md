@@ -183,6 +183,16 @@ Three properties the AST alone could not provide:
   the composition, carried on the IR node, serialized into the bundle, and
   addressable via `node_by_alias`. A singleton kind's position is nameable the
   same way (`Sandbox[as worker_sandbox]`) even though it has no binding id.
+  Aliases are **referenceable in relations**: a bare identifier that is not a
+  pattern kind refers to the position declared with `as`
+  (`Port[github as gh] within Sandbox + gh -> Gate`), and declaration plus
+  references collapse to **one IR node** — the same position participates in
+  every relation that mentions it, which is what lets a linear expression
+  declare a DAG. Alias-addressed queries (`alias_related_to`,
+  `related_to_alias`) ask relations of one position rather than a kind or a
+  binding, and case law fires through alias-mediated relations exactly as
+  through direct ones. An identifier matching no kind and no alias is a parse
+  error; a reference takes no bracket clause.
 - **Activation is explicit.** A binding is part of the compiled system only if
   the composition activates it: an anonymous `Port` activates every Port
   binding; `Port[staging]` activates exactly that one. Activation then **closes
@@ -316,7 +326,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 142 tests: metamodel, checker rejections for every
+cargo test --workspace     # 147 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -352,14 +362,13 @@ generation, **and the relational case law**; binding dependencies are
 serialized, and generated from; enforcement activation is explicit
 (`always_on` or activated, else rejected); and positions carry **declared
 node identity** distinct from binding identity (`Port[github as
-staging_deployer]`, unique, shadow-checked, serialized). The next steps of
-that arc: make aliases **referenceable** in relations (today an alias names a
-position but relational queries still address kinds and binding ids — an
-aliased relation like `staging_deployer -> Gate` needs alias-addressed
-selectors), and **runtime-instance identity** beneath node identity
-(pattern kind → composition node → runtime instance, e.g.
-`run-42/staging_deployer/attempt-2`) for per-worker Gate approval and
-worker-scoped obligations. Beyond it: a
+staging_deployer]`, unique, shadow-checked, serialized) — and aliases are
+**referenceable in relations** (`staging_deployer -> Gate`), with declaration
+and references collapsing to one IR node and alias-addressed relational
+queries on the graph. The next step of that arc is **runtime-instance
+identity** beneath node identity (pattern kind → composition node → runtime
+instance, e.g. `run-42/staging_deployer/attempt-2`) for per-worker Gate
+approval and worker-scoped obligations. Beyond it: a
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a

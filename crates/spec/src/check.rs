@@ -16,55 +16,7 @@ use std::collections::BTreeSet;
 use crate::binding::Binding;
 use crate::compose::Expr;
 use crate::graph::ResolvedGraph;
-use crate::model::{Bindings, LawEvent, LawKind, PatternInstance, PatternKind, SpecFile};
-
-/// Which concrete bindings a composition relation refers to.
-///
-/// This is the instance-addressability bridge between the topology and the
-/// bindings: a relation like `Port within Sandbox` yields a set of Port
-/// *occurrences*, and this turns them into a predicate over binding ids. An
-/// anonymous occurrence (`Port`) names *every* binding of its kind — the
-/// conservative reading when the author did not disambiguate — so a derived
-/// obligation still applies to all of them. Labelled occurrences
-/// (`Port[staging]`) name exactly those bindings, so the obligation attaches to
-/// the component that actually stands in the relation and not its siblings.
-enum Refers {
-    /// Every binding of the kind (at least one anonymous occurrence was found).
-    All,
-    /// Exactly these binding ids.
-    Ids(BTreeSet<String>),
-}
-
-impl Refers {
-    /// Fold a set of occurrences into a binding predicate. Any anonymous
-    /// occurrence widens the reference to `All`.
-    fn from(instances: &[&PatternInstance]) -> Self {
-        let mut ids = BTreeSet::new();
-        for i in instances {
-            match &i.id {
-                Some(id) => {
-                    ids.insert(id.clone());
-                }
-                None => return Refers::All,
-            }
-        }
-        Refers::Ids(ids)
-    }
-
-    /// Whether the binding with this id is one the relation refers to.
-    fn includes(&self, id: &str) -> bool {
-        match self {
-            Refers::All => true,
-            Refers::Ids(ids) => ids.contains(id),
-        }
-    }
-
-    /// Whether the relation refers to no binding at all (so a rule keyed on it
-    /// should not fire).
-    fn is_empty(&self) -> bool {
-        matches!(self, Refers::Ids(ids) if ids.is_empty())
-    }
-}
+use crate::model::{Bindings, LawEvent, LawKind, PatternKind, SpecFile};
 
 /// Whether a diagnostic blocks compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +76,7 @@ pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnos
     let mut d = Vec::new();
     check_cross_reference(spec, expr, &mut d);
     check_instance_references(spec, expr, &mut d);
-    check_active_coverage(spec, expr, &graph, &mut d);
+    check_active_coverage(spec, &graph, &mut d);
     check_gate(spec, &mut d);
     check_laws(spec, binding, &mut d);
     check_ledger(spec, &mut d);
@@ -133,7 +85,7 @@ pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnos
     check_ports(spec, &mut d);
     check_hives(spec, &mut d);
     check_specialists(spec, &mut d);
-    check_composition(spec, expr, &graph, binding, &mut d);
+    check_composition(spec, &graph, binding, &mut d);
     d
 }
 
@@ -326,12 +278,7 @@ fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnosti
 /// from generation, and this warning says so, per binding, so the exclusion is
 /// visible rather than silent. (A kind that is absent from the expression
 /// entirely already gets the kind-level `bound_but_unreferenced` warning.)
-fn check_active_coverage(
-    spec: &SpecFile,
-    expr: &Expr,
-    graph: &ResolvedGraph,
-    d: &mut Vec<Diagnostic>,
-) {
+fn check_active_coverage(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>) {
     let b = &spec.bindings;
     for (kind, label) in [
         (PatternKind::Law, "law"),
@@ -341,7 +288,7 @@ fn check_active_coverage(
         (PatternKind::Port, "port"),
         (PatternKind::Hive, "hive"),
     ] {
-        if !expr.contains(kind) {
+        if !graph.has_kind(kind) {
             continue; // kind-level warning already covers this
         }
         let Some(ids) = addressable_ids(b, kind) else {
@@ -646,7 +593,6 @@ fn check_hives(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
 
 fn check_composition(
     spec: &SpecFile,
-    expr: &Expr,
     graph: &ResolvedGraph,
     binding: &dyn Binding,
     d: &mut Vec<Diagnostic>,
@@ -689,7 +635,7 @@ fn check_composition(
     // A Gate that runs within, or downstream of, a Night Shift ⇒ durable
     // suspension and precondition revalidation. A Gate in an independent branch
     // is used attended and needs neither.
-    if expr.runs_under(PatternKind::NightShift, PatternKind::Gate) {
+    if graph.runs_under(PatternKind::NightShift, PatternKind::Gate) {
         if let Some(gate) = &b.gate {
             let durable = gate.durable == Some(true);
             let resume_ok = gate
@@ -708,7 +654,7 @@ fn check_composition(
     }
 
     // Sandbox + Ledger ⇒ recorded lineage between source and sandbox.
-    if expr.contains(PatternKind::Sandbox) && expr.contains(PatternKind::Ledger) {
+    if graph.has_kind(PatternKind::Sandbox) && graph.has_kind(PatternKind::Ledger) {
         if let Some(sandbox) = &b.sandbox {
             for field in ["source_revision", "sandbox_id", "merge_revision"] {
                 if !sandbox.lineage.iter().any(|l| l == field) {
@@ -725,18 +671,17 @@ fn check_composition(
     }
 
     // A Verb placed `within` a control context must have a real interceptor:
-    // among the Law occurrences that enclose the Verb, at least one must
-    // resolve to a **Guard** (a pre-execution control point). An Obligation Law
-    // records debt after the fact — `Verb within Law[validate-after-edit]`
-    // where that law is an obligation contains no interceptor at all, and the
-    // old "some Law binding exists" test could not see the difference.
-    let enclosing_laws = expr.instances_enclosing(PatternKind::Verb, PatternKind::Law);
-    if !enclosing_laws.is_empty() {
-        let refers = Refers::from(&enclosing_laws);
+    // among the Law positions that enclose the Verb, at least one must resolve
+    // to a **Guard** (a pre-execution control point). An Obligation Law records
+    // debt after the fact — `Verb within Law[validate-after-edit]` where that
+    // law is an obligation contains no interceptor at all, and the old "some
+    // Law binding exists" test could not see the difference.
+    if graph.kind_within(PatternKind::Verb, PatternKind::Law) {
+        let enclosing = graph.bindings_enclosing(PatternKind::Verb, PatternKind::Law);
         let has_guard = b
             .laws
             .iter()
-            .any(|l| refers.includes(&l.id) && matches!(l.kind, LawKind::Guard));
+            .any(|l| enclosing.contains(&l.id) && matches!(l.kind, LawKind::Guard));
         if !has_guard {
             d.push(Diagnostic::error(
                 "composition.control_without_interceptor",
@@ -749,77 +694,67 @@ fn check_composition(
     // A Port that participates in an unattended pipeline ⇒ replay safety. The
     // Port may be upstream OR downstream of the Night Shift — the canonical
     // `Port -> Night Shift -> Gate` recipe has the Port feeding the unattended
-    // run — so this uses data-path participation (either direction) or nesting,
-    // not a directional "governs". Instance-addressed: only the Port occurrences
-    // actually on the unattended path carry the obligation, so an attended
+    // run — so this reads data-path edges (either direction), nesting, and
+    // provisioning off the graph. Only the bindings whose positions actually
+    // stand in those relations carry the obligation, so an attended
     // `Port[metrics]` beside a `Port[deploy] -> NightShift` is left alone.
-    if expr.contains(PatternKind::NightShift) {
-        let mut unattended = expr.instances_within(PatternKind::Port, PatternKind::NightShift);
-        unattended
-            .extend(expr.instances_flow_connected(PatternKind::Port, PatternKind::NightShift));
-        unattended.extend(expr.instances_provisioned(PatternKind::NightShift, PatternKind::Port));
-        let refers = Refers::from(&unattended);
-        if !refers.is_empty() {
-            for p in b
-                .ports
-                .iter()
-                .filter(|p| refers.includes(&p.id) && !p.write.is_empty() && !p.idempotent)
-            {
-                d.push(Diagnostic::error(
-                    "composition.port_replay_safety",
-                    format!(
-                        "port '{}' has write authority and runs unattended (Night Shift) but is not \
-                         idempotent; absence of a local success record is not evidence the external \
-                         action did not occur",
-                        p.id
-                    ),
-                ));
-            }
-        }
+    let mut unattended = graph.bindings_within(PatternKind::Port, PatternKind::NightShift);
+    unattended.extend(graph.bindings_flow_connected(PatternKind::Port, PatternKind::NightShift));
+    unattended.extend(graph.bindings_provisioned(PatternKind::NightShift, PatternKind::Port));
+    for p in b
+        .ports
+        .iter()
+        .filter(|p| unattended.contains(&p.id) && !p.write.is_empty() && !p.idempotent)
+    {
+        d.push(Diagnostic::error(
+            "composition.port_replay_safety",
+            format!(
+                "port '{}' has write authority and runs unattended (Night Shift) but is not \
+                 idempotent; absence of a local success record is not evidence the external \
+                 action did not occur",
+                p.id
+            ),
+        ));
     }
 
     // A Port running *within* a Sandbox ⇒ external isolation. Copy-on-write
     // isolates the filesystem, not the world; a sandboxed Port write must be
-    // isolated, disabled, or a proposal. A Port outside the sandbox is
-    // unaffected — and now that is decided per occurrence, so `Port[b]` beside
-    // `Port[a] within Sandbox` does not inherit the obligation.
-    let sandboxed = Refers::from(&expr.instances_within(PatternKind::Port, PatternKind::Sandbox));
-    if !sandboxed.is_empty() {
-        for p in b
-            .ports
-            .iter()
-            .filter(|p| sandboxed.includes(&p.id) && !p.write.is_empty() && p.sandboxed.is_none())
-        {
-            d.push(Diagnostic::error(
-                "composition.sandbox_port_isolation",
-                format!(
-                    "port '{}' can write externally but does not declare `sandboxed` behavior; a \
-                     filesystem Sandbox does not contain external effects",
-                    p.id
-                ),
-            ));
-        }
+    // isolated, disabled, or a proposal. Decided per position on the graph's
+    // Within edges, so `Port[b]` beside `Port[a] within Sandbox` does not
+    // inherit the obligation.
+    let sandboxed = graph.bindings_within(PatternKind::Port, PatternKind::Sandbox);
+    for p in b
+        .ports
+        .iter()
+        .filter(|p| sandboxed.contains(&p.id) && !p.write.is_empty() && p.sandboxed.is_none())
+    {
+        d.push(Diagnostic::error(
+            "composition.sandbox_port_isolation",
+            format!(
+                "port '{}' can write externally but does not declare `sandboxed` behavior; a \
+                 filesystem Sandbox does not contain external effects",
+                p.id
+            ),
+        ));
     }
 
     // A Gate *within* a Hive ⇒ approval scope must be declared: global vs.
     // per-worker are different systems. Only the Hive occurrence that actually
     // encloses the Gate needs the declaration; a sibling Hive is unaffected.
-    let gated_hives = Refers::from(&expr.instances_enclosing(PatternKind::Gate, PatternKind::Hive));
-    if !gated_hives.is_empty() {
-        for h in b
-            .hives
-            .iter()
-            .filter(|h| gated_hives.includes(&h.id) && h.approval_scope.is_none())
-        {
-            d.push(Diagnostic::error(
-                "composition.hive_gate_approval_scope",
-                format!(
-                    "hive '{}' contains a Gate but does not declare approval_scope (global vs. \
-                     per-worker)",
-                    h.id
-                ),
-            ));
-        }
+    let gated_hives = graph.bindings_enclosing(PatternKind::Gate, PatternKind::Hive);
+    for h in b
+        .hives
+        .iter()
+        .filter(|h| gated_hives.contains(&h.id) && h.approval_scope.is_none())
+    {
+        d.push(Diagnostic::error(
+            "composition.hive_gate_approval_scope",
+            format!(
+                "hive '{}' contains a Gate but does not declare approval_scope (global vs. \
+                 per-worker)",
+                h.id
+            ),
+        ));
     }
 }
 

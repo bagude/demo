@@ -148,6 +148,99 @@ impl ResolvedGraph {
         self.activation.get(&kind).is_some_and(|a| a.includes(id))
     }
 
+    // ---- relational queries -------------------------------------------------
+    //
+    // Composition case law runs on THESE, not on the syntax tree: the graph's
+    // typed edges already carry the resolved binding ids per position, so a
+    // rule asks "which bindings stand in this relation" and attaches the
+    // derived obligation to exactly those. An anonymous occurrence resolved to
+    // every binding of its kind at lowering time, so the conservative
+    // all-bindings reading is materialized in the nodes rather than re-derived
+    // by each rule.
+
+    fn node(&self, id: NodeId) -> &Node {
+        &self.nodes[id.0]
+    }
+
+    /// Whether any position of `kind` exists in the composition.
+    pub fn has_kind(&self, kind: PatternKind) -> bool {
+        self.nodes.iter().any(|n| n.kind == kind)
+    }
+
+    /// Whether some `from`-kind position stands in `relation` to some
+    /// `to`-kind position (edge direction is the operator's own).
+    fn kinds_related(&self, relation: Relation, from: PatternKind, to: PatternKind) -> bool {
+        self.edges.iter().any(|e| {
+            e.relation == relation && self.node(e.from).kind == from && self.node(e.to).kind == to
+        })
+    }
+
+    /// The resolved binding ids on one side of every matching edge.
+    fn edge_bindings(
+        &self,
+        relation: Relation,
+        from: PatternKind,
+        to: PatternKind,
+        collect_from_side: bool,
+    ) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for e in self.edges.iter().filter(|e| e.relation == relation) {
+            let (f, t) = (self.node(e.from), self.node(e.to));
+            if f.kind == from && t.kind == to {
+                let subject = if collect_from_side { f } else { t };
+                out.extend(subject.bindings.iter().cloned());
+            }
+        }
+        out
+    }
+
+    /// Kind-level: some `inner` executes within some `outer`.
+    pub fn kind_within(&self, inner: PatternKind, outer: PatternKind) -> bool {
+        self.kinds_related(Relation::Within, inner, outer)
+    }
+
+    /// Kind-level: `p` runs within, or downstream of, `entry` — `p` executes in
+    /// the context `entry` establishes (within | flows-into | provisioned-by).
+    pub fn runs_under(&self, entry: PatternKind, p: PatternKind) -> bool {
+        self.kinds_related(Relation::Within, p, entry)
+            || self.kinds_related(Relation::FlowsTo, entry, p)
+            || self.kinds_related(Relation::Provisions, entry, p)
+    }
+
+    /// Binding ids of the `inner`-kind positions that execute within an
+    /// `outer`-kind position.
+    pub fn bindings_within(&self, inner: PatternKind, outer: PatternKind) -> BTreeSet<String> {
+        self.edge_bindings(Relation::Within, inner, outer, true)
+    }
+
+    /// Binding ids of the `outer`-kind positions that enclose an `inner`-kind
+    /// position (the containers, rather than the contained).
+    pub fn bindings_enclosing(&self, inner: PatternKind, outer: PatternKind) -> BTreeSet<String> {
+        self.edge_bindings(Relation::Within, inner, outer, false)
+    }
+
+    /// Binding ids of the `subject`-kind positions that sit on a data path with
+    /// an `other`-kind position — either flow direction.
+    pub fn bindings_flow_connected(
+        &self,
+        subject: PatternKind,
+        other: PatternKind,
+    ) -> BTreeSet<String> {
+        let mut s = self.edge_bindings(Relation::FlowsTo, subject, other, true);
+        s.extend(self.edge_bindings(Relation::FlowsTo, other, subject, false));
+        s
+    }
+
+    /// Binding ids of the `provisioned`-kind positions that a
+    /// `provisioner`-kind position provisions.
+    pub fn bindings_provisioned(
+        &self,
+        provisioner: PatternKind,
+        provisioned: PatternKind,
+    ) -> BTreeSet<String> {
+        self.edge_bindings(Relation::Provisions, provisioner, provisioned, false)
+    }
+
     // ---- lowering -----------------------------------------------------------
 
     /// Recursively lower `expr`, returning the node ids of the subtree's leaf
@@ -383,6 +476,82 @@ platform: { type: claude-code }
         assert!(g.is_active(PatternKind::Delegate, "worker"));
         assert!(g.is_active(PatternKind::Port, "gh"));
         assert!(g.is_active(PatternKind::Law, "guard-writes"));
+    }
+
+    #[test]
+    fn binding_queries_name_only_the_related_component() {
+        // Case-law attachment: only the enclosed occurrence's binding stands in
+        // the Within relation; its sibling outside the Sandbox does not.
+        let expr = parse("Port[staging] within Sandbox + Port[production]").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let inside = g.bindings_within(PatternKind::Port, PatternKind::Sandbox);
+        assert_eq!(
+            inside.iter().collect::<Vec<_>>(),
+            ["staging"],
+            "only the enclosed port"
+        );
+    }
+
+    #[test]
+    fn anonymous_occurrence_relates_every_binding_of_the_kind() {
+        // The conservative reading is materialized at lowering: a bare `Port`
+        // node resolved to every Port binding, so the relation names them all.
+        let expr = parse("Port within Sandbox").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let inside = g.bindings_within(PatternKind::Port, PatternKind::Sandbox);
+        assert!(inside.contains("staging") && inside.contains("production"));
+    }
+
+    #[test]
+    fn flow_and_provision_queries_are_direction_honest() {
+        // Canonical `Port -> NightShift`: upstream Port is flow-connected, but
+        // nothing "runs under" the Night Shift in that topology.
+        let expr = parse("Port[staging] -> NightShift").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let on_path = g.bindings_flow_connected(PatternKind::Port, PatternKind::NightShift);
+        assert_eq!(on_path.iter().collect::<Vec<_>>(), ["staging"]);
+        assert!(!g.runs_under(PatternKind::NightShift, PatternKind::Port));
+
+        let expr = parse("NightShift => Port[production]").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let made = g.bindings_provisioned(PatternKind::NightShift, PatternKind::Port);
+        assert_eq!(made.iter().collect::<Vec<_>>(), ["production"]);
+        assert!(g.runs_under(PatternKind::NightShift, PatternKind::Port));
+    }
+
+    #[test]
+    fn enclosing_query_names_the_container() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "unused" }
+bindings:
+  delegates:
+    - { id: w, agent: a.md, contract_schema: s.json, tools: [Read] }
+  hives:
+    - id: research
+      orchestrator: o.md
+      worker: w
+      fan_out: static
+      budget: 100
+      max_depth: 2
+      termination: done
+      merge: root
+      worker_isolation: disjoint
+    - id: deploy
+      orchestrator: o.md
+      worker: w
+      fan_out: static
+      budget: 100
+      max_depth: 2
+      termination: done
+      merge: root
+      worker_isolation: disjoint
+platform: { type: claude-code }
+"#;
+        let expr = parse("(Gate within Hive[research]) + Hive[deploy]").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(yaml));
+        let gated = g.bindings_enclosing(PatternKind::Gate, PatternKind::Hive);
+        assert_eq!(gated.iter().collect::<Vec<_>>(), ["research"]);
     }
 
     #[test]

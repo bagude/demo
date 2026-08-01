@@ -126,10 +126,12 @@ Each of these is a compile **error**, verified by tests in
   termination, merge, worker isolation, and a real worker contract.
 - **Composition case law (relation-aware, instance-addressed)** — obligations
   that exist only because two patterns meet *in a particular topology*. The
-  checker asks the composition AST direction-honest relational questions
-  (`is_within`, `flows_to`, `provisions`, `flow_connected`, `runs_under`,
-  `may_execute_concurrently`), not mere presence, so a Gate in one independent
-  branch and a Night Shift in another do **not** trip the rule. A Gate **running
+  rules run on the **resolved graph's typed edges** (`bindings_within`,
+  `bindings_enclosing`, `bindings_flow_connected`, `bindings_provisioned`,
+  `runs_under`), not on the syntax tree and not on mere presence — each rule
+  reads which *bindings* stand in the relation straight off the graph, so a
+  Gate in one independent branch and a Night Shift in another do **not** trip
+  the rule. A Gate **running
   under** a Night Shift ⇒ durable, revalidating suspension; a Port on the
   unattended data path ⇒ replay-safe idempotency; a Port **within** a Sandbox ⇒
   declared external isolation; a Gate **within** a Hive ⇒ declared approval
@@ -306,13 +308,13 @@ directory fsync on Unix) and hashed, injection-safe names, and the Ledger is
 fsynced; and approver identity distinguishes a *claimed* label from an
 authenticated principal.
 
-Documented follow-ups (not yet done). The graph IR exists and drives activation
-and generation; the remaining step of that arc is to **migrate the relational
-case law itself onto the graph's typed edges** (rules still query the AST via
-`Sel` selectors) and to give surface syntax for **declared node identity**
-distinct from binding identity (today two positions sharing a binding are
-distinct nodes, but they cannot yet be *named* apart, e.g. `staging_deployer`
-vs `release_annotator` both backed by `Port: github`). Beyond it: a
+Documented follow-ups (not yet done). The graph IR drives activation,
+generation, **and the relational case law** (rules read typed edges and their
+resolved binding ids; the AST keeps only parsing, presence, and reference
+resolution). The remaining step of that arc is surface syntax for **declared
+node identity** distinct from binding identity (today two positions sharing a
+binding are distinct nodes, but they cannot yet be *named* apart, e.g.
+`staging_deployer` vs `release_annotator` both backed by `Port: github`). Beyond it: a
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a

@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use kernel::clock::now_rfc3339;
-use kernel::event::{Decision, Event, EventLog};
+use kernel::event::{Decision, Event, EventLog, Stage};
 use kernel::gate::{Approver, AuthMethod, Checkpoint, GateStore, Preconditions};
 use kernel::law::Enforcement;
 use kernel::packet::TaskPacket;
@@ -217,6 +217,10 @@ enum Command {
         /// One execution attempt of a logical action (replay safety).
         #[arg(long)]
         attempt_id: Option<String>,
+        /// The lifecycle stage this evidence belongs to (proposed |
+        /// authorized | executing | completed | recorded).
+        #[arg(long, default_value = "recorded")]
+        stage: String,
     },
 }
 
@@ -261,6 +265,10 @@ enum GateCmd {
         /// multiplicity bound — the IR's replication cardinality, enforced.
         #[arg(long)]
         positions: Option<PathBuf>,
+        /// The Playbook digest governing this run (run binding on the
+        /// recorded gate.request event).
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
     /// Sign a checkpoint's canonical approval message (gate, run, action,
     /// preconditions, anchored ledger head, expiry) with an approver's private
@@ -306,6 +314,13 @@ enum GateCmd {
         /// registry is plain host configuration.
         #[arg(long)]
         authority: Option<String>,
+        /// Ledger to record the approval decision to — granted or refused,
+        /// a Gate approval is a governed decision.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        /// The Playbook digest governing this run.
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
     /// Revalidate a checkpoint's approval against the current world, including
     /// any required obligations. Exits 0 if the approval still holds, 1 if it
@@ -341,6 +356,10 @@ enum GateCmd {
         /// approval never resumes worker 3.
         #[arg(long)]
         instance: Option<String>,
+        /// The Playbook digest governing this run (run binding on the
+        /// recorded gate.verify event).
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
 }
 
@@ -530,6 +549,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: format!("post_tool.obligation.{obligation}"),
+                stage: Stage::Executing.as_str().into(),
                 input_refs,
                 output_refs: vec![],
                 decision: Decision::Recorded,
@@ -576,6 +596,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: "gate.pre_commit".into(),
+                stage: Stage::Authorized.as_str().into(),
                 input_refs: outstanding
                     .iter()
                     .map(|o| format!("obligation:{o}"))
@@ -650,6 +671,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: kernel::obligation::discharge_transition(&obligation),
+                stage: Stage::Completed.as_str().into(),
                 input_refs,
                 output_refs: vec![],
                 decision: Decision::Recorded,
@@ -739,6 +761,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     actor: "kernel".into(),
                     timestamp: now_rfc3339(),
                     transition: "hive.spawn".into(),
+                    stage: Stage::Authorized.as_str().into(),
                     input_refs,
                     output_refs: vec![],
                     decision: if outcome.is_ok() {
@@ -804,6 +827,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         actor: "kernel".into(),
                         timestamp: now_rfc3339(),
                         transition: "hive.settle".into(),
+                        stage: Stage::Completed.as_str().into(),
                         input_refs: vec![format!("spawn:{spawn_id}"), format!("spent:{spent}")],
                         output_refs: vec![],
                         decision: if result.is_ok() {
@@ -942,7 +966,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             evidence_refs,
             playbook_ref,
             attempt_id,
+            stage,
         } => {
+            let stage =
+                Stage::parse(&stage).ok_or_else(|| format!("unknown lifecycle stage '{stage}'"))?;
             let event = Event {
                 run_id,
                 task_id,
@@ -951,6 +978,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 actor,
                 timestamp: now_rfc3339(),
                 transition,
+                stage: stage.as_str().into(),
                 input_refs,
                 output_refs: vec![],
                 decision: decision.into(),
@@ -1014,6 +1042,7 @@ fn pre_tool(
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: transition.into(),
+            stage: Stage::Authorized.as_str().into(),
             input_refs: input_refs.clone(),
             output_refs: vec![],
             decision,
@@ -1073,6 +1102,7 @@ fn pre_bash(
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: "pre_bash.protected".into(),
+            stage: Stage::Authorized.as_str().into(),
             input_refs: vec![format!("protected:{hit}")],
             output_refs: vec![],
             decision: if granted {
@@ -1139,6 +1169,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             instance,
             positions,
+            playbook_ref,
         } => {
             let action_hash = match (action_hash, action_file) {
                 (Some(h), _) => h,
@@ -1186,6 +1217,18 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             .anchoring_ledger_head(ledger_head)
             .for_instance(instance);
             let path = GateStore::at(&checkpoints).save(&checkpoint)?;
+            // The halt itself is evidence: the action is PROPOSED, awaiting
+            // authorization — the first stage of the unified protocol.
+            record_gate_event(
+                ledger.as_deref(),
+                &checkpoint,
+                "gate.request",
+                Stage::Proposed,
+                Decision::Recorded,
+                vec![],
+                vec![],
+                playbook_ref.as_deref(),
+            )?;
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
         }
@@ -1210,6 +1253,8 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             signature,
             trusted_keys,
             authority,
+            ledger,
+            playbook_ref,
         } => {
             let mut cp = GateStore::load(&checkpoint)?;
             // Signature auth is VERIFIED before anything is recorded: an
@@ -1228,6 +1273,16 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let public = match approver_key(trusted_keys, authority.as_deref(), &approver) {
                     Ok(k) => k,
                     Err(e) => {
+                        record_gate_event(
+                            ledger.as_deref(),
+                            &cp,
+                            "gate.approve",
+                            Stage::Authorized,
+                            Decision::Rejected,
+                            vec![format!("approver:{approver}")],
+                            vec![format!("reason:{e}")],
+                            playbook_ref.as_deref(),
+                        )?;
                         eprintln!("approval NOT recorded: {e}");
                         return Ok(ExitCode::FAILURE);
                     }
@@ -1235,6 +1290,16 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let message =
                     kernel::sign::approval_message(&cp, &cp.preconditions, expiry.as_deref());
                 if let Err(e) = kernel::sign::verify(&public, &message, &signature) {
+                    record_gate_event(
+                        ledger.as_deref(),
+                        &cp,
+                        "gate.approve",
+                        Stage::Authorized,
+                        Decision::Rejected,
+                        vec![format!("approver:{approver}")],
+                        vec![format!("reason:{e}")],
+                        playbook_ref.as_deref(),
+                    )?;
                     eprintln!("approval NOT recorded: {e}");
                     return Ok(ExitCode::FAILURE);
                 }
@@ -1259,6 +1324,19 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             );
             store.save(&cp)?;
             let a = cp.approval.as_ref().unwrap();
+            record_gate_event(
+                ledger.as_deref(),
+                &cp,
+                "gate.approve",
+                Stage::Authorized,
+                Decision::Approved,
+                vec![
+                    format!("approver:{}", a.approver.principal),
+                    format!("auth:{:?}", a.approver.auth).to_lowercase(),
+                ],
+                vec![],
+                playbook_ref.as_deref(),
+            )?;
             println!(
                 "approved {} by {} ({})",
                 cp.action_hash,
@@ -1280,13 +1358,28 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             trusted_keys,
             authority,
             instance,
+            playbook_ref,
         } => {
             let cp = GateStore::load(&checkpoint)?;
             let preconds = parse_preconditions(&preconditions)?;
 
+            let refuse = |reason: String| -> Result<ExitCode, Box<dyn std::error::Error>> {
+                record_gate_event(
+                    ledger.as_deref(),
+                    &cp,
+                    "gate.verify",
+                    Stage::Authorized,
+                    Decision::Rejected,
+                    vec![],
+                    vec![format!("reason:{reason}")],
+                    playbook_ref.as_deref(),
+                )?;
+                eprintln!("{reason}");
+                Ok(ExitCode::FAILURE)
+            };
+
             if let Err(e) = cp.revalidate(&action_hash, &preconds, &now_rfc3339()) {
-                eprintln!("approval invalid: {e}");
-                return Ok(ExitCode::FAILURE);
+                return refuse(format!("approval invalid: {e}"));
             }
 
             // An instance-bound checkpoint resumes only for ITS instance:
@@ -1295,25 +1388,22 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             // rather than silently granted a narrower approval than exists.
             match (&cp.instance, &instance) {
                 (Some(bound), Some(presenting)) if bound != presenting => {
-                    eprintln!(
+                    return refuse(format!(
                         "gate refused: checkpoint is bound to instance '{bound}', but \
                          '{presenting}' is presenting for resume"
-                    );
-                    return Ok(ExitCode::FAILURE);
+                    ));
                 }
                 (Some(bound), None) => {
-                    eprintln!(
+                    return refuse(format!(
                         "gate refused: checkpoint is bound to instance '{bound}'; pass \
                          --instance to resume as it"
-                    );
-                    return Ok(ExitCode::FAILURE);
+                    ));
                 }
                 (None, Some(presenting)) => {
-                    eprintln!(
+                    return refuse(format!(
                         "gate refused: checkpoint is not instance-bound, but '{presenting}' \
                          claims to resume as an instance"
-                    );
-                    return Ok(ExitCode::FAILURE);
+                    ));
                 }
                 _ => {}
             }
@@ -1336,8 +1426,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let outstanding =
                     kernel::obligation::outstanding(&events, &cp.requires_obligations, &ctx);
                 if let Err(e) = cp.check_obligations(&outstanding) {
-                    eprintln!("gate refused: {e}");
-                    return Ok(ExitCode::FAILURE);
+                    return refuse(format!("gate refused: {e}"));
                 }
             }
 
@@ -1352,8 +1441,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     );
                 };
                 if let Err(e) = EventLog::at(ledger).verify_anchor(head) {
-                    eprintln!("gate refused: ledger integrity: {e}");
-                    return Ok(ExitCode::FAILURE);
+                    return refuse(format!("gate refused: ledger integrity: {e}"));
                 }
             }
 
@@ -1373,11 +1461,11 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                             .into());
                     };
                     let Some(evidence) = &approval.approver.evidence else {
-                        eprintln!(
+                        return refuse(
                             "gate refused: signature-authenticated approval carries no \
                              signature evidence"
+                                .to_string(),
                         );
-                        return Ok(ExitCode::FAILURE);
                     };
                     // The approver is resolved through the CURRENT registry:
                     // a principal revoked since approval is refused here,
@@ -1389,8 +1477,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     ) {
                         Ok(k) => k,
                         Err(e) => {
-                            eprintln!("gate refused: {e}");
-                            return Ok(ExitCode::FAILURE);
+                            return refuse(format!("gate refused: {e}"));
                         }
                     };
                     let message = kernel::sign::approval_message(
@@ -1399,16 +1486,72 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         approval.expiry.as_deref(),
                     );
                     if let Err(e) = kernel::sign::verify(&public, &message, evidence) {
-                        eprintln!("gate refused: {e}");
-                        return Ok(ExitCode::FAILURE);
+                        return refuse(format!("gate refused: {e}"));
                     }
                 }
             }
 
+            record_gate_event(
+                ledger.as_deref(),
+                &cp,
+                "gate.verify",
+                Stage::Authorized,
+                Decision::Approved,
+                vec![],
+                vec![],
+                playbook_ref.as_deref(),
+            )?;
             println!("approval valid");
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Append a Gate lifecycle event: the Gate's proposed → authorized arc is
+/// Ledger evidence like any other governed decision. No-op without a ledger
+/// (the caller may be operating on checkpoints alone), but when one is given
+/// the append is NOT best-effort — losing gate evidence is an error.
+#[allow(clippy::too_many_arguments)]
+fn record_gate_event(
+    ledger: Option<&std::path::Path>,
+    cp: &Checkpoint,
+    transition: &str,
+    stage: Stage,
+    decision: Decision,
+    extra_refs: Vec<String>,
+    evidence_refs: Vec<String>,
+    playbook_ref: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(ledger) = ledger else {
+        return Ok(());
+    };
+    let mut input_refs = vec![
+        format!("gate:{}", cp.gate_id),
+        format!("action:{}", cp.action_hash),
+    ];
+    if let Some(i) = &cp.instance {
+        input_refs.push(format!("instance:{i}"));
+    }
+    input_refs.extend(extra_refs);
+    let event = Event {
+        run_id: cp.run_id.clone(),
+        task_id: cp.task_id.clone(),
+        parent_task_id: None,
+        action_id: format!("gate_{}", transition.trim_start_matches("gate.")),
+        actor: "kernel".into(),
+        timestamp: now_rfc3339(),
+        transition: transition.into(),
+        stage: stage.as_str().into(),
+        input_refs,
+        output_refs: vec![],
+        decision,
+        evidence_refs,
+        playbook_ref: playbook_ref.unwrap_or_default().to_string(),
+        kernel_ref: kernel::kernel_ref(),
+        attempt_id: None,
+    };
+    EventLog::at(ledger).append(&event)?;
+    Ok(())
 }
 
 /// The current git branch, when one can be determined — the key branch-scoped

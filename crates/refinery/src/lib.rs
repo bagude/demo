@@ -451,6 +451,7 @@ mod tests {
             actor: "kernel".into(),
             timestamp: "2026-07-31T00:00:00Z".into(),
             transition: transition.into(),
+            stage: String::new(),
             input_refs: path.map(|p| format!("path:{p}")).into_iter().collect(),
             output_refs: vec![],
             decision,

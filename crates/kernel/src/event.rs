@@ -34,6 +34,63 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Where in the governed lifecycle a decision happened — the **unified
+/// transition protocol**. Every action moves through the same arc:
+///
+/// ```text
+/// proposed → authorized → executing → completed
+///                └── every stage lands in the Ledger as evidence ──┘
+/// ```
+///
+/// - `proposed` — an action is halted for consideration (a Gate checkpoint
+///   is taken).
+/// - `authorized` — an authorization decision was made on a proposed action:
+///   a Guard's allow/deny, the commit gate, a Hive spawn, a Gate approval or
+///   resume revalidation. The *outcome* is the event's [`Decision`]; the
+///   stage says only where in the lifecycle it was decided.
+/// - `executing` — evidence emitted from the execution phase (an Obligation
+///   opening after an edit is proof the edit ran).
+/// - `completed` — completion accounting: a discharge, a Hive settlement.
+/// - `recorded` — a pure evidence append making no lifecycle claim.
+///
+/// The stage is a **field of the envelope**, not a rewrite of the transition
+/// string: transition subjects (`pre_tool.edit`, `gate.approve`) stay stable
+/// because chained history is frozen and downstream consumers match on them.
+/// The protocol unifies how every event names its lifecycle position without
+/// invalidating a byte of existing evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    Proposed,
+    Authorized,
+    Executing,
+    Completed,
+    Recorded,
+}
+
+impl Stage {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Stage::Proposed => "proposed",
+            Stage::Authorized => "authorized",
+            Stage::Executing => "executing",
+            Stage::Completed => "completed",
+            Stage::Recorded => "recorded",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Stage> {
+        match s {
+            "proposed" => Some(Stage::Proposed),
+            "authorized" => Some(Stage::Authorized),
+            "executing" => Some(Stage::Executing),
+            "completed" => Some(Stage::Completed),
+            "recorded" => Some(Stage::Recorded),
+            _ => None,
+        }
+    }
+}
+
 /// The outcome recorded for a governed transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +129,13 @@ pub struct Event {
     pub timestamp: String,
     /// The kind of transition, e.g. `pre_tool.edit`, `gate.approve`.
     pub transition: String,
+    /// Where in the governed lifecycle this decision happened (see
+    /// [`Stage`]): `proposed`, `authorized`, `executing`, `completed`, or
+    /// `recorded`. Mandatory on every event this kernel writes; an empty
+    /// value is explicit legacy state — a record written before the unified
+    /// protocol existed.
+    #[serde(default)]
+    pub stage: String,
     /// References or hashes of inputs — never the inputs themselves.
     #[serde(default)]
     pub input_refs: Vec<String>,
@@ -415,6 +479,7 @@ mod tests {
             actor: "kernel".into(),
             timestamp: "2026-07-31T00:00:00Z".into(),
             transition: "pre_tool.edit".into(),
+            stage: "authorized".into(),
             input_refs: vec!["sha256:abc".into()],
             output_refs: vec![],
             decision,
@@ -466,6 +531,31 @@ mod tests {
         let back: Event = serde_json::from_str(legacy).unwrap();
         assert!(back.kernel_ref.is_empty());
         assert!(back.playbook_ref.is_empty());
+        assert!(back.stage.is_empty(), "pre-protocol records claim no stage");
+    }
+
+    #[test]
+    fn the_lifecycle_stage_rides_the_envelope() {
+        // The unified protocol is a FIELD, not a transition rewrite: the
+        // subject string stays stable while the stage names the lifecycle
+        // position uniformly.
+        let e = event(Decision::Allowed);
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"stage\":\"authorized\""));
+        assert!(json.contains("\"transition\":\"pre_tool.edit\""));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(Stage::parse(&back.stage), Some(Stage::Authorized));
+        // Every stage name round-trips through its parser.
+        for s in [
+            Stage::Proposed,
+            Stage::Authorized,
+            Stage::Executing,
+            Stage::Completed,
+            Stage::Recorded,
+        ] {
+            assert_eq!(Stage::parse(s.as_str()), Some(s));
+        }
+        assert_eq!(Stage::parse("bogus"), None);
     }
 
     #[test]

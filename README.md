@@ -84,9 +84,40 @@ cargo build
 ./target/debug/refinery --ledger evidence/events.jsonl
 ```
 
-Generated files carry a provenance header (`GENERATED FROM … / SPEC HASH … / DO
-NOT EDIT DIRECTLY`) so the source-of-truth hierarchy stays legible: edits flow
-*down* from the spec, never up from generated output.
+Generated files carry a provenance header (`GENERATED FROM … / SOURCE … /
+PLAYBOOK … / DO NOT EDIT DIRECTLY`) so the source-of-truth hierarchy stays
+legible: edits flow *down* from the spec, never up from generated output.
+
+## Identity: source provenance is not executable provenance
+
+The same `harness.patterns.yaml` compiled by a different compiler can govern a
+materially different system — different case law, a different IR, a different
+generated tree. Binding evidence to the spec bytes alone would let a **stale**
+artifact carry a matching reference, which is exactly how a checked-in Playbook
+came to claim `Gate: kernel-mediated` long after the compiler retracted that
+guarantee. So the identity chain has four links:
+
+```
+source_ref   = sha256(spec bytes)
+compiler_ref = sha256(harnessc version + spec-crate version + IR schema + target)
+ir_ref       = sha256(canonical serialized resolved IR)
+playbook_ref = sha256(source_ref + compiler_ref + target + ir_ref)
+```
+
+Every generated artifact records all four, and the generated hooks stamp
+`playbook_ref` — the compiled *interpretation* — onto every Ledger event, so a
+run is bound to the semantics that governed it and not merely to the bytes it
+started from.
+
+```sh
+# fail if the checked-in tree is not what this compiler produces
+./target/debug/harnessc verify
+```
+
+`harnessc verify` compiles in memory and compares every expected file against
+the tree on disk, naming what is missing or differs. A workspace test runs it
+against this repository's own Playbook, so a stale artifact fails CI instead of
+shipping.
 
 ## What the compiler rejects (the interesting part)
 
@@ -121,14 +152,17 @@ Each of these is a compile **error**, verified by tests in
   and it must not be a reserved name — a pattern kind or grammar keyword —
   because a bare `Gate` always parses as the language construct, leaving the
   position unreferenceable (`composition.alias_reserved_name`).
-- **`composition.self_relation`** — a relation written explicitly between one
-  position and itself (`p -> p`). An incidental self-pair from conservative
-  all-pairs lowering is dropped as noise, but explicit syntax is reported rather
-  than silently erased, since deleting it could delete a derived obligation.
-- **`composition.alias_replication_conflict`** — one position used both inside
-  and outside a `× N` replication. Until runtime instances exist a node cannot
-  be both a singleton and a replicated set, so the ambiguity is refused instead
-  of folded into a boolean.
+- **`composition.self_relation`** — an **irreflexive** relation between one
+  position and itself. Under the all-pairs reading, `p -> (p + Gate)` declares
+  `p -> p` just as `p -> p` does, so both are reported (the message says which);
+  neither is silently erased, because deleting the syntax could delete a derived
+  obligation. `Coexist` is exempt as *reflexive* — "p coexists with p" is
+  vacuously true, which is what lets a reference appear in both operands of a
+  `+` without declaring nonsense.
+- **`composition.alias_replication_conflict`** — one position used at differing
+  multiplicities. Cardinality is part of the IR (`× 2` and `× 20` do not lower
+  alike, and nested `(A × 2) × 3` is `Exact(6)`), so `(p × 2) + (p × 3)` is a
+  conflict just as `p + (p × 3)` is.
 - **`composition.control_without_interceptor`** — a Verb composed `within` a
   Law whose enclosing occurrences resolve to no **Guard**. An Obligation Law
   records debt after the fact; it does not intercept the Verb, and "some Law
@@ -252,11 +286,14 @@ same IR is **serialized into the compiled bundle** (`harness/playbook.json`
 `graph` key, and the portable `harness.manifest.json`) as a two-layer object:
 `nodes` and `position_edges` (architectural occurrences), `binding_edges` (the
 `uses` dependencies, each with the bindings-block field it was read from), and
-`bindings` — **every** addressable binding with `active` and its
-`activation_origins` (`surface`, `uses:<kind>`, `always_on`). Because the
-inventory covers active *and* inactive bindings with provenance, an `always_on`
-Law that occupies no position and has no incoming `uses` edge still appears in
-the proof object rather than being emitted invisibly. The pattern/enforcement
+`components` — **every** bound component with `active` and its
+`activation_origins` (`surface`, `surface:critic`, `uses:<kind>`, `always_on`),
+plus `self_relations`. The inventory is keyed by *component*, not binding id, so
+**singletons are covered too**: an `always_on` Ledger owns no id and occupies no
+position, yet the backend can emit it, so it appears here — as does a Law
+activated only through a `uses` edge, and a Delegate activated only by a
+`Critic` position (which records `surface:critic` rather than an empty origin
+set). Node cardinality is serialized as `multiplicity`. The pattern/enforcement
 summary derives from the same resolved architecture, not from surface presence,
 so a Law activated only through a dependency shows up in it. `harnessc show`
 prints all of this. The spec hash proves *identity*; the serialized IR makes the
@@ -353,7 +390,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 152 tests: metamodel, checker rejections for every
+cargo test --workspace     # 159 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -389,7 +426,12 @@ generation, **and the relational case law**; binding dependencies are
 serialized, and generated from; enforcement activation is explicit
 (`always_on` or activated, else rejected); and positions carry **declared
 node identity** distinct from binding identity (`Port[github as
-staging_deployer]`, unique, shadow-checked, serialized); aliases are
+staging_deployer]`, unique, shadow-checked, serialized); **executable
+provenance** binds evidence to the compiled interpretation
+(`playbook_ref = source + compiler + IR + target`) with `harnessc verify` and a
+CI test proving the checked-in tree is fresh; replication **cardinality** is
+part of the IR; every bound component — singleton or named — carries activation
+status and provenance; aliases are
 **referenceable in relations** (`staging_deployer -> Gate`), resolved *without
 substitution* so a declaration stays distinguishable from a reference and a
 repeated declaration is rejected at the symbol layer; and binding activation is

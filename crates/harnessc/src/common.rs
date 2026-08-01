@@ -7,6 +7,11 @@ use serde_json::{json, Value};
 /// The generator version, stamped into every provenance header.
 pub const GENERATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Version of the serialized IR schema. Bumped whenever the shape of
+/// [`graph_json`] changes, so an artifact generated against an older schema is
+/// detectable even when the spec bytes and crate versions are unchanged.
+pub const IR_SCHEMA_VERSION: &str = "2";
+
 /// The spec file name generated artifacts point back to.
 pub const SPEC_FILENAME: &str = "harness.patterns.yaml";
 
@@ -27,12 +32,19 @@ pub struct Generated {
 /// a header naming the spec and its hash, so edits are known to flow *down*
 /// from the spec, never up from generated output.
 pub struct Prov<'a> {
-    pub spec_hash: &'a str,
+    pub refs: &'a Refs,
 }
 
 impl Prov<'_> {
+    /// The identity a generated artifact advertises. `SOURCE` is the spec
+    /// bytes; `PLAYBOOK` binds source + compiler + IR, so a rebuild by a
+    /// different compiler — or against a changed IR — is detectably different
+    /// even when the spec is byte-identical.
     fn hash_line(&self) -> String {
-        format!("SPEC HASH: {}", self.spec_hash)
+        format!(
+            "SOURCE: {}\n# PLAYBOOK: {}",
+            self.refs.source_ref, self.refs.playbook_ref
+        )
     }
 
     /// A `#`-style provenance header for shell/YAML files.
@@ -46,16 +58,20 @@ impl Prov<'_> {
     /// An HTML-comment provenance header for Markdown files.
     pub fn md_header(&self) -> String {
         format!(
-            "<!--\n  GENERATED FROM: {SPEC_FILENAME}\n  {}\n  GENERATOR: harnessc {GENERATOR_VERSION}\n  DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.\n-->\n",
-            self.hash_line()
+            "<!--\n  GENERATED FROM: {SPEC_FILENAME}\n  SOURCE: {}\n  PLAYBOOK: {}\n  GENERATOR: harnessc {GENERATOR_VERSION}\n  DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.\n-->\n",
+            self.refs.source_ref, self.refs.playbook_ref
         )
     }
 
     fn json_provenance(&self) -> Value {
         json!({
             "from": SPEC_FILENAME,
-            "spec_hash": self.spec_hash,
+            "source_ref": self.refs.source_ref,
+            "compiler_ref": self.refs.compiler_ref,
+            "ir_ref": self.refs.ir_ref,
+            "playbook_ref": self.refs.playbook_ref,
             "generator": format!("harnessc {GENERATOR_VERSION}"),
+            "ir_schema": IR_SCHEMA_VERSION,
             "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`."
         })
     }
@@ -110,7 +126,7 @@ pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
                 "instance": n.instance,
                 "alias": n.alias,
                 "bindings": n.bindings,
-                "replicated": n.replicated,
+                "multiplicity": n.multiplicity.count(),
                 "origin": "surface",
             })
         })
@@ -142,20 +158,32 @@ pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
             })
         })
         .collect();
-    // Every addressable binding, active or not, with WHY it is active. An
-    // `always_on` Law that occupies no position and has no incoming `uses`
-    // edge appears here — so the serialized IR accounts for everything the
-    // backend may emit, not only what the surface expression mentioned.
-    let bindings: Vec<Value> = g
-        .binding_inventory(&compiled.spec.bindings)
+    // EVERY bound component — singleton and named — with why it is active. A
+    // singleton `always_on` Ledger owns no binding id and occupies no position,
+    // yet the backend can emit it, so it must appear here for the IR to account
+    // for everything generated.
+    let components: Vec<Value> = g
+        .component_inventory(&compiled.spec.bindings)
         .into_iter()
-        .map(|rb| {
-            let origins: Vec<String> = rb.origins.iter().map(|o| o.as_str()).collect();
+        .map(|c| {
+            let origins: Vec<String> = c.origins.iter().map(|o| o.as_str()).collect();
             json!({
-                "pattern": rb.kind.to_string(),
-                "id": rb.id,
-                "active": rb.active,
+                "pattern": c.key.kind().to_string(),
+                "id": c.key.id(),
+                "singleton": c.key.id().is_none(),
+                "active": c.active,
                 "activation_origins": origins,
+            })
+        })
+        .collect();
+    let self_relations: Vec<Value> = g
+        .self_relations()
+        .iter()
+        .map(|sr| {
+            json!({
+                "node": sr.node.0,
+                "relation": sr.relation.as_str(),
+                "origin": sr.origin.as_str(),
             })
         })
         .collect();
@@ -163,8 +191,86 @@ pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
         "nodes": nodes,
         "position_edges": position_edges,
         "binding_edges": binding_edges,
-        "bindings": bindings,
+        "components": components,
+        "self_relations": self_relations,
     })
+}
+
+/// SHA-256 over the canonical serialization of the resolved IR — the identity
+/// of the compiled *interpretation*, as distinct from the source bytes.
+pub fn ir_digest(compiled: &spec::CompiledSpec) -> String {
+    sha256_hex(
+        serde_json::to_string(&graph_json(compiled))
+            .expect("IR is serializable")
+            .as_bytes(),
+    )
+}
+
+/// The identity of the compiler that produced an artifact: this crate's
+/// version, the front-end's, the IR schema version, and the target binding.
+///
+/// Source provenance and executable provenance are different things — the same
+/// `harness.patterns.yaml` compiled by a different compiler can govern a
+/// materially different system. Binding only the spec bytes would let a stale
+/// or divergent artifact carry a matching reference.
+pub fn compiler_digest(target: &str) -> String {
+    sha256_hex(
+        format!(
+            "harnessc={GENERATOR_VERSION};spec={};ir_schema={IR_SCHEMA_VERSION};target={target}",
+            spec::VERSION
+        )
+        .as_bytes(),
+    )
+}
+
+/// The full identity chain for a compiled Playbook.
+pub fn refs(compiled: &spec::CompiledSpec, source_ref: &str, target: &str) -> Refs {
+    let compiler_ref = compiler_digest(target);
+    let ir_ref = ir_digest(compiled);
+    let playbook_ref = sha256_hex(
+        format!("source={source_ref};compiler={compiler_ref};target={target};ir={ir_ref}")
+            .as_bytes(),
+    );
+    Refs {
+        source_ref: source_ref.to_string(),
+        compiler_ref,
+        ir_ref,
+        playbook_ref,
+    }
+}
+
+/// The identity a generated artifact and every runtime event carries.
+#[derive(Debug, Clone)]
+pub struct Refs {
+    /// Hash of the specification bytes.
+    pub source_ref: String,
+    /// Hash of the compiler/backend/IR-schema/target identity.
+    pub compiler_ref: String,
+    /// Hash of the canonical resolved IR.
+    pub ir_ref: String,
+    /// Hash binding all of the above — the compiled interpretation's identity.
+    pub playbook_ref: String,
+}
+
+impl Refs {
+    pub fn json(&self) -> Value {
+        json!({
+            "source_ref": self.source_ref,
+            "compiler_ref": self.compiler_ref,
+            "ir_ref": self.ir_ref,
+            "playbook_ref": self.playbook_ref,
+        })
+    }
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut s = String::from("sha256:");
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 /// The pattern kinds of the compiled architecture with their enforcement

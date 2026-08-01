@@ -1,13 +1,20 @@
 <!--
   GENERATED FROM: harness.patterns.yaml
-  SPEC HASH: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
+  SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
+  PLAYBOOK: sha256:5bd0adc51c51dd8ff0b180727d0d7c58cc6f0c8ed60eae0848782e57dba03ae1
   GENERATOR: harnessc 0.1.0
   DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 -->
 
 # harness/ — compiled Playbook (claude-code)
 
-Compiled from `harness.patterns.yaml` (spec hash `sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2`) by `harnessc 0.1.0`.
+Compiled from `harness.patterns.yaml` by `harnessc 0.1.0`.
+
+- source `sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2` — the specification bytes
+- compiler `sha256:c744a06904107264c2e187b8bb13f4f0dbdb473a7ff368bf98b6df326c0c2c21` — compiler, back-end, IR schema, target
+- IR `sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536` — the resolved composition graph
+- **playbook `sha256:5bd0adc51c51dd8ff0b180727d0d7c58cc6f0c8ed60eae0848782e57dba03ae1`** — all of the above; the identity of this compiled
+interpretation, and what runtime evidence binds to
 
 ## Regenerating
 

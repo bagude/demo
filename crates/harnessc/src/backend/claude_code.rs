@@ -14,7 +14,7 @@ use spec::{Binding, CompiledSpec};
 use crate::backend::Backend;
 use crate::common::{
     self, active_packet_path, ledger_destination, runtime_dirs, schema_files, GenFile, Generated,
-    Prov,
+    Prov, Refs,
 };
 
 /// The commit-boundary hook path (the Gate's enforcement point).
@@ -49,9 +49,9 @@ impl Backend for ClaudeCode {
         self
     }
 
-    fn generate(&self, compiled: &CompiledSpec, spec_hash: &str) -> Generated {
+    fn generate(&self, compiled: &CompiledSpec, refs: &Refs) -> Generated {
         let spec = &compiled.spec;
-        let prov = Prov { spec_hash };
+        let prov = Prov { refs };
         let mut files = Vec::new();
 
         files.push(claude_md(&prov, spec));
@@ -76,7 +76,7 @@ impl Backend for ClaudeCode {
         for dir in runtime_dirs(spec) {
             files.push(prov.gitkeep(&dir));
         }
-        files.push(harness_readme(&prov, spec_hash));
+        files.push(harness_readme(&prov, refs));
 
         Generated { files }
     }
@@ -260,13 +260,13 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
             "enforce-file-scope" => format!(
                 "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope\n# (and protect enforcement artifacts unless amends_enforcement is granted).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --protected \"{protected}\"\n",
                 header = prov.hash_header(),
-                playbook = prov.spec_hash,
+                playbook = prov.refs.playbook_ref,
                 protected = PROTECTED_FILE,
             ),
             "require-validation" => format!(
                 "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\"\n",
                 header = prov.hash_header(),
-                playbook = prov.spec_hash,
+                playbook = prov.refs.playbook_ref,
             ),
             other => format!(
                 "#!/usr/bin/env bash\n{header}# Law '{other}' has no kernel binding.\necho 'law {other} is not implemented by the kernel' >&2\nexit 1\n",
@@ -303,7 +303,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
             "#!/usr/bin/env bash\n{header}# Self-protection: block `rm`/`mv`/redirect against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --protected \"{protected}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\"\n",
             header = prov.hash_header(),
             protected = PROTECTED_FILE,
-            playbook = prov.spec_hash,
+            playbook = prov.refs.playbook_ref,
         ),
     });
     out
@@ -510,7 +510,7 @@ fn playbook_manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
         json!({
             "name": spec.harness.name,
             "version": spec.harness.version,
-            "playbook_ref": prov.spec_hash,
+            "refs": prov.refs.json(),
             "composition": spec.composition.expression,
             "patterns": patterns,
             // The checked IR itself: the compiled interpretation is auditable,
@@ -549,16 +549,24 @@ fn gate_file(prov: &Prov, gate: &GateBinding) -> GenFile {
     )
 }
 
-fn harness_readme(prov: &Prov, spec_hash: &str) -> GenFile {
+fn harness_readme(prov: &Prov, refs: &Refs) -> GenFile {
     let mut body = String::new();
     body.push_str(&prov.md_header());
     body.push('\n');
     body.push_str("# harness/ — compiled Playbook (claude-code)\n\n");
     body.push_str(&format!(
-        "Compiled from `{}` (spec hash `{}`) by `harnessc {}`.\n\n",
+        "Compiled from `{}` by `harnessc {}`.\n\n\
+         - source `{}` — the specification bytes\n\
+         - compiler `{}` — compiler, back-end, IR schema, target\n\
+         - IR `{}` — the resolved composition graph\n\
+         - **playbook `{}`** — all of the above; the identity of this compiled\n\
+           interpretation, and what runtime evidence binds to\n\n",
         common::SPEC_FILENAME,
-        spec_hash,
-        common::GENERATOR_VERSION
+        common::GENERATOR_VERSION,
+        refs.source_ref,
+        refs.compiler_ref,
+        refs.ir_ref,
+        refs.playbook_ref,
     ));
     body.push_str(
         "## Regenerating\n\n```sh\nharnessc check\nharnessc build --target claude-code\n```\n\n",
@@ -618,7 +626,10 @@ mod tests {
 
     fn build() -> Generated {
         let compiled = spec::compile(SPECIMEN, &ClaudeCode).expect("specimen compiles");
-        ClaudeCode.generate(&compiled, "sha256:test")
+        ClaudeCode.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        )
     }
 
     fn find<'a>(g: &'a Generated, path: &str) -> &'a GenFile {
@@ -665,7 +676,10 @@ bindings:
 platform: { type: claude-code }
 "#;
         let compiled = spec::compile(yaml, &ClaudeCode).expect("compiles");
-        let g = ClaudeCode.generate(&compiled, "sha256:test");
+        let g = ClaudeCode.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        );
         let ports = &find(&g, "harness/ports.json").content;
         assert!(ports.contains("staging"), "active port is generated");
         assert!(

@@ -46,6 +46,17 @@ enum Command {
         #[arg(long)]
         target: Option<String>,
     },
+    /// Check that the generated tree on disk matches what this compiler would
+    /// produce — a freshness proof for the checked-in Playbook.
+    Verify {
+        #[arg(long, default_value = "harness.patterns.yaml")]
+        spec: PathBuf,
+        /// Directory the generated tree lives in.
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+    },
     /// Validate, then generate the harness.
     Build {
         #[arg(long, default_value = "harness.patterns.yaml")]
@@ -102,6 +113,48 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             print_model(&compiled, backend.as_binding());
             Ok(ExitCode::SUCCESS)
         }
+        Command::Verify { spec, out, target } => {
+            let (text, hash) = read_spec(&spec)?;
+            let backend = resolve_backend(target.as_deref(), &text)?;
+            let compiled = match spec::compile(&text, backend.as_binding()) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprint!("{e}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            };
+            let refs = common::refs(&compiled, &hash, backend.platform());
+            let generated = backend.generate(&compiled, &refs);
+            let mut stale = Vec::new();
+            for file in &generated.files {
+                let path = out.join(&file.path);
+                match std::fs::read_to_string(&path) {
+                    Err(_) => stale.push(format!("missing:  {}", file.path)),
+                    Ok(on_disk) if on_disk != file.content => {
+                        stale.push(format!("differs:  {}", file.path))
+                    }
+                    Ok(_) => {}
+                }
+            }
+            if stale.is_empty() {
+                println!(
+                    "fresh: {} generated file(s) match playbook {}",
+                    generated.files.len(),
+                    refs.playbook_ref
+                );
+                Ok(ExitCode::SUCCESS)
+            } else {
+                eprintln!(
+                    "stale: the generated tree does not match this compiler (playbook {})",
+                    refs.playbook_ref
+                );
+                for s in &stale {
+                    eprintln!("  {s}");
+                }
+                eprintln!("run `harnessc build --out {}` to regenerate", out.display());
+                Ok(ExitCode::FAILURE)
+            }
+        }
         Command::Build {
             spec,
             out,
@@ -121,12 +174,16 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 eprintln!("{w}");
             }
 
-            let generated = backend.generate(&compiled, &hash);
+            let refs = common::refs(&compiled, &hash, backend.platform());
+            let generated = backend.generate(&compiled, &refs);
             println!(
-                "compiled '{}' for '{}' (spec {}) with harnessc {GENERATOR_VERSION}",
+                "compiled '{}' for '{}' with harnessc {GENERATOR_VERSION}\n  source   {}\n  compiler {}\n  ir       {}\n  playbook {}",
                 compiled.spec.harness.name,
                 backend.platform(),
-                hash
+                refs.source_ref,
+                refs.compiler_ref,
+                refs.ir_ref,
+                refs.playbook_ref,
             );
             for file in &generated.files {
                 let target_path = out.join(&file.path);
@@ -228,7 +285,10 @@ fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
             (None, Some(a)) => format!("[as {a}]"),
             (None, None) => String::new(),
         };
-        let repl = if n.replicated { "  (replicated)" } else { "" };
+        let repl = match n.multiplicity {
+            spec::graph::Multiplicity::One => String::new(),
+            spec::graph::Multiplicity::Exact(k) => format!("  (× {k})"),
+        };
         println!(
             "  node {}: {}{}  bindings[{}]{}",
             n.id.0,
@@ -252,20 +312,16 @@ fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
             u.kind.origin()
         );
     }
-    for rb in g.binding_inventory(&s.bindings) {
-        let origins: Vec<String> = rb.origins.iter().map(|o| o.as_str()).collect();
-        if rb.active {
-            println!(
-                "  active:   {}[{}]  via {}",
-                rb.kind,
-                rb.id,
-                origins.join(", ")
-            );
+    for c in g.component_inventory(&s.bindings) {
+        let origins: Vec<String> = c.origins.iter().map(|o| o.as_str()).collect();
+        let name = match c.key.id() {
+            Some(id) => format!("{}[{}]", c.key.kind(), id),
+            None => format!("{} (singleton)", c.key.kind()),
+        };
+        if c.active {
+            println!("  active:   {name}  via {}", origins.join(", "));
         } else {
-            println!(
-                "  inactive: {}[{}]  (not activated; excluded from generation)",
-                rb.kind, rb.id
-            );
+            println!("  inactive: {name}  (not activated; excluded from generation)");
         }
     }
 

@@ -1,15 +1,198 @@
 {
   "_generated": {
+    "compiler_ref": "sha256:c744a06904107264c2e187b8bb13f4f0dbdb473a7ff368bf98b6df326c0c2c21",
     "from": "harness.patterns.yaml",
     "generator": "harnessc 0.1.0",
+    "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
+    "ir_schema": "2",
     "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
-    "spec_hash": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
+    "playbook_ref": "sha256:5bd0adc51c51dd8ff0b180727d0d7c58cc6f0c8ed60eae0848782e57dba03ae1",
+    "source_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
   },
   "composition": "Intake -> Verb within (Law + Gate) + Ledger",
+  "graph": {
+    "binding_edges": [
+      {
+        "from": {
+          "id": "approve-commit",
+          "pattern": "Gate"
+        },
+        "kind": "gate_obligation",
+        "origin": "gate.requires_obligations",
+        "relation": "uses",
+        "to": {
+          "id": "require-validation",
+          "pattern": "Law"
+        }
+      }
+    ],
+    "components": [
+      {
+        "activation_origins": [
+          "surface"
+        ],
+        "active": true,
+        "id": null,
+        "pattern": "Intake",
+        "singleton": true
+      },
+      {
+        "activation_origins": [
+          "surface"
+        ],
+        "active": true,
+        "id": null,
+        "pattern": "Verb",
+        "singleton": true
+      },
+      {
+        "activation_origins": [
+          "surface"
+        ],
+        "active": true,
+        "id": null,
+        "pattern": "Ledger",
+        "singleton": true
+      },
+      {
+        "activation_origins": [
+          "surface"
+        ],
+        "active": true,
+        "id": "enforce-file-scope",
+        "pattern": "Law",
+        "singleton": false
+      },
+      {
+        "activation_origins": [
+          "surface",
+          "uses:gate_obligation"
+        ],
+        "active": true,
+        "id": "require-validation",
+        "pattern": "Law",
+        "singleton": false
+      },
+      {
+        "activation_origins": [
+          "surface"
+        ],
+        "active": true,
+        "id": "approve-commit",
+        "pattern": "Gate",
+        "singleton": false
+      }
+    ],
+    "nodes": [
+      {
+        "alias": null,
+        "bindings": [],
+        "instance": null,
+        "multiplicity": 1,
+        "node_id": 0,
+        "origin": "surface",
+        "pattern": "Intake"
+      },
+      {
+        "alias": null,
+        "bindings": [],
+        "instance": null,
+        "multiplicity": 1,
+        "node_id": 1,
+        "origin": "surface",
+        "pattern": "Verb"
+      },
+      {
+        "alias": null,
+        "bindings": [
+          "enforce-file-scope",
+          "require-validation"
+        ],
+        "instance": null,
+        "multiplicity": 1,
+        "node_id": 2,
+        "origin": "surface",
+        "pattern": "Law"
+      },
+      {
+        "alias": null,
+        "bindings": [
+          "approve-commit"
+        ],
+        "instance": null,
+        "multiplicity": 1,
+        "node_id": 3,
+        "origin": "surface",
+        "pattern": "Gate"
+      },
+      {
+        "alias": null,
+        "bindings": [],
+        "instance": null,
+        "multiplicity": 1,
+        "node_id": 4,
+        "origin": "surface",
+        "pattern": "Ledger"
+      }
+    ],
+    "position_edges": [
+      {
+        "from": 2,
+        "relation": "coexist",
+        "to": 3
+      },
+      {
+        "from": 1,
+        "relation": "within",
+        "to": 2
+      },
+      {
+        "from": 1,
+        "relation": "within",
+        "to": 3
+      },
+      {
+        "from": 0,
+        "relation": "flows_to",
+        "to": 1
+      },
+      {
+        "from": 0,
+        "relation": "flows_to",
+        "to": 2
+      },
+      {
+        "from": 0,
+        "relation": "flows_to",
+        "to": 3
+      },
+      {
+        "from": 0,
+        "relation": "coexist",
+        "to": 4
+      },
+      {
+        "from": 1,
+        "relation": "coexist",
+        "to": 4
+      },
+      {
+        "from": 2,
+        "relation": "coexist",
+        "to": 4
+      },
+      {
+        "from": 3,
+        "relation": "coexist",
+        "to": 4
+      }
+    ],
+    "self_relations": []
+  },
   "name": "enablement-workbench",
   "patterns": [
     {
-      "enforcement": "kernel-mediated",
+      "enforcement": "runtime-enforced",
       "name": "Gate"
     },
     {
@@ -29,6 +212,11 @@
       "name": "Verb"
     }
   ],
-  "playbook_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2",
+  "refs": {
+    "compiler_ref": "sha256:c744a06904107264c2e187b8bb13f4f0dbdb473a7ff368bf98b6df326c0c2c21",
+    "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
+    "playbook_ref": "sha256:5bd0adc51c51dd8ff0b180727d0d7c58cc6f0c8ed60eae0848782e57dba03ae1",
+    "source_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
+  },
   "version": "0.1.0"
 }

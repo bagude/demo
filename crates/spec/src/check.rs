@@ -329,19 +329,25 @@ fn check_aliases(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>
     // A relation written between one position and itself is not a topology the
     // algebra can express; it is almost certainly a mistake, and dropping it
     // silently would drop any obligation derived from it.
-    for (node, relation) in graph.self_relations() {
+    for sr in graph.self_relations() {
         let name = graph
             .nodes()
             .iter()
-            .find(|n| n.id == *node)
+            .find(|n| n.id == sr.node)
             .and_then(|n| n.alias.clone())
             .unwrap_or_else(|| "a position".to_string());
+        let how = match sr.origin {
+            crate::graph::SelfRelationOrigin::Direct => "written directly",
+            crate::graph::SelfRelationOrigin::GroupExpansion => {
+                "declared by expanding a grouped operand"
+            }
+        };
         d.push(Diagnostic::error(
             "composition.self_relation",
             format!(
-                "'{name}' stands in an explicit '{}' relation to itself; a position cannot be its \
+                "'{name}' stands in a '{}' relation to itself ({how}); a position cannot be its \
                  own container, upstream, or provisioner",
-                relation.as_str()
+                sr.relation.as_str()
             ),
         ));
     }
@@ -441,7 +447,7 @@ fn check_enforcement_activation(spec: &SpecFile, graph: &ResolvedGraph, d: &mut 
         }
     }
     if let Some(ledger) = &b.ledger {
-        if !ledger.always_on && !graph.has_kind(PatternKind::Ledger) {
+        if !ledger.always_on && !graph.is_singleton_active(PatternKind::Ledger) {
             d.push(Diagnostic::error(
                 "composition.enforcement_not_activated",
                 "a Ledger is bound but nothing references it; recording is disclosure — \

@@ -10,6 +10,10 @@
 //! A spec compiles only if it is structurally complete *and* every safety
 //! pattern it declares is fully specified.
 
+/// This crate's version, folded into the compiler identity so a front-end
+/// change is visible in `compiler_ref`.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod binding;
 pub mod check;
 pub mod compose;

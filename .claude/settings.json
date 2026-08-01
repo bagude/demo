@@ -1,9 +1,13 @@
 {
   "_generated": {
+    "compiler_ref": "sha256:c744a06904107264c2e187b8bb13f4f0dbdb473a7ff368bf98b6df326c0c2c21",
     "from": "harness.patterns.yaml",
     "generator": "harnessc 0.1.0",
+    "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
+    "ir_schema": "2",
     "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
-    "spec_hash": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
+    "playbook_ref": "sha256:5bd0adc51c51dd8ff0b180727d0d7c58cc6f0c8ed60eae0848782e57dba03ae1",
+    "source_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
   },
   "hooks": {
     "PostToolUse": [

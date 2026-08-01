@@ -11,12 +11,12 @@ pub mod portable;
 
 use spec::{Binding, CompiledSpec};
 
-use crate::common::Generated;
+use crate::common::{Generated, Refs};
 
 /// A platform back-end: capabilities (via [`Binding`]) plus generation.
 pub trait Backend: Binding {
     /// Generate the files for a compiled harness.
-    fn generate(&self, compiled: &CompiledSpec, spec_hash: &str) -> Generated;
+    fn generate(&self, compiled: &CompiledSpec, refs: &Refs) -> Generated;
 
     /// This back-end viewed as a checker capability.
     fn as_binding(&self) -> &dyn Binding;
@@ -48,7 +48,10 @@ mod tests {
         let compiled = spec::compile(yaml, backend.as_binding())
             .unwrap_or_else(|e| panic!("example must compile: {e}"));
         backend
-            .generate(&compiled, "sha256:test")
+            .generate(
+                &compiled,
+                &crate::common::refs(&compiled, "sha256:test", "test"),
+            )
             .files
             .into_iter()
             .map(|f| f.path)
@@ -82,7 +85,12 @@ mod tests {
         let backend = select("portable").unwrap();
         for yaml in [RESEARCH_ORG, SAFE_DEPLOY] {
             let compiled = spec::compile(yaml, backend.as_binding()).expect("compiles portable");
-            let files = backend.generate(&compiled, "sha256:test").files;
+            let files = backend
+                .generate(
+                    &compiled,
+                    &crate::common::refs(&compiled, "sha256:test", "test"),
+                )
+                .files;
             assert!(files.iter().any(|f| f.path == "harness.manifest.json"));
         }
     }

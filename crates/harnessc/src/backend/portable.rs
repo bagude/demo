@@ -14,7 +14,7 @@ use spec::{Binding, CompiledSpec};
 use crate::backend::Backend;
 use crate::common::{
     active_packet_path, checkpoint_schema, event_schema, ledger_destination, runtime_dirs,
-    task_packet_schema, GenFile, Generated, Prov,
+    task_packet_schema, GenFile, Generated, Prov, Refs,
 };
 
 pub struct Portable;
@@ -37,9 +37,9 @@ impl Backend for Portable {
         self
     }
 
-    fn generate(&self, compiled: &CompiledSpec, spec_hash: &str) -> Generated {
+    fn generate(&self, compiled: &CompiledSpec, refs: &Refs) -> Generated {
         let spec = &compiled.spec;
-        let prov = Prov { spec_hash };
+        let prov = Prov { refs };
         let mut files = Vec::new();
 
         files.push(manifest(&prov, compiled));
@@ -52,7 +52,7 @@ impl Backend for Portable {
         for dir in runtime_dirs(spec) {
             files.push(prov.gitkeep(&dir));
         }
-        files.push(readme(&prov, spec_hash));
+        files.push(readme(&prov, refs));
 
         Generated { files }
     }
@@ -189,7 +189,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
                 format!(
                     "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope (with self-protection).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool --packet \"${{ACTIVE_PACKET:-{packet}}}\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --protected \"enforcement.protected\"\n",
                     header = prov.hash_header(),
-                    playbook = prov.spec_hash,
+                    playbook = prov.refs.playbook_ref,
                 ),
             ),
             "require-validation" => (
@@ -197,7 +197,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
                 format!(
                     "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"\n",
                     header = prov.hash_header(),
-                    playbook = prov.spec_hash,
+                    playbook = prov.refs.playbook_ref,
                 ),
             ),
             _ => continue,
@@ -229,7 +229,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         content: format!(
             "#!/usr/bin/env bash\n{header}# Self-protection: block destructive Bash against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash --packet \"${{ACTIVE_PACKET:-{packet}}}\" --protected \"enforcement.protected\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"\n",
             header = prov.hash_header(),
-            playbook = prov.spec_hash,
+            playbook = prov.refs.playbook_ref,
         ),
     });
     out
@@ -256,13 +256,14 @@ fn protected_file(prov: &Prov) -> GenFile {
     }
 }
 
-fn readme(prov: &Prov, spec_hash: &str) -> GenFile {
+fn readme(prov: &Prov, refs: &Refs) -> GenFile {
     let mut body = String::new();
     body.push_str(&prov.md_header());
     body.push('\n');
     body.push_str("# Portable harness bundle\n\n");
     body.push_str(&format!(
-        "Compiled from `harness.patterns.yaml` (spec hash `{spec_hash}`).\n\n"
+        "Compiled from `harness.patterns.yaml` (source `{}`, playbook `{}`).\n\n",
+        refs.source_ref, refs.playbook_ref
     ));
     body.push_str(
         "This bundle has no platform-specific launcher. `harness.manifest.json` declares, for each \
@@ -286,7 +287,10 @@ mod tests {
 
     fn build() -> Generated {
         let compiled = spec::compile(SPECIMEN, &Portable).expect("specimen compiles");
-        Portable.generate(&compiled, "sha256:test")
+        Portable.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        )
     }
 
     fn has(g: &Generated, path: &str) -> bool {

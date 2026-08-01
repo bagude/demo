@@ -70,8 +70,46 @@ pub struct Node {
     /// binding of the kind for an anonymous occurrence. Empty for singleton
     /// kinds, which have no id namespace.
     pub bindings: Vec<String>,
-    /// True when the occurrence sits under a `× N` replication.
-    pub replicated: bool,
+    /// How many runtime instances this position stands for. `× N` is bounded
+    /// replication, so the cardinality is part of the compiled semantics —
+    /// `Delegate × 3` and `Delegate × 30` are different systems and must not
+    /// lower to the same IR.
+    pub multiplicity: Multiplicity,
+}
+
+impl Node {
+    /// Whether this position sits under any replication.
+    pub fn replicated(&self) -> bool {
+        self.multiplicity != Multiplicity::One
+    }
+}
+
+/// How many runtime instances a position stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Multiplicity {
+    /// A single instance — the position was not replicated.
+    One,
+    /// Exactly `n` instances (`× n`). **Nested replication multiplies**:
+    /// `(A × 2) × 3` is three groups of two, i.e. `Exact(6)` instances of `A`.
+    /// That reading is declared here rather than left to collapse into a flag.
+    Exact(u32),
+}
+
+impl Multiplicity {
+    /// Compose an inner multiplicity with an enclosing `× n`.
+    fn times(self, n: u32) -> Multiplicity {
+        match self {
+            Multiplicity::One => Multiplicity::Exact(n),
+            Multiplicity::Exact(m) => Multiplicity::Exact(m.saturating_mul(n)),
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        match self {
+            Multiplicity::One => 1,
+            Multiplicity::Exact(n) => *n,
+        }
+    }
 }
 
 /// The relation an edge carries. Direction is `from → to` in the operator's
@@ -84,6 +122,16 @@ pub enum Relation {
     FlowsTo,
     Provisions,
     Coexist,
+}
+
+impl Relation {
+    /// Whether relating a position to *itself* is a contradiction. Containment,
+    /// data flow, and provisioning are irreflexive; coexistence is reflexive
+    /// (a position trivially coexists with itself), which is what lets an alias
+    /// reference appear in both operands of a `+` without declaring nonsense.
+    fn is_irreflexive(&self) -> bool {
+        !matches!(self, Relation::Coexist)
+    }
 }
 
 /// A typed edge between two positions.
@@ -183,12 +231,14 @@ pub struct ResolvedGraph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     uses: Vec<UseEdge>,
-    /// Relations written explicitly between one position and itself
-    /// (`p -> p`). Recorded rather than dropped: an incidental self-pair from
-    /// conservative all-pairs lowering is noise, but an explicitly written
-    /// self-relation is syntax, and silently deleting syntax can delete a
-    /// derived obligation with it. The checker reports these.
-    self_relations: Vec<(NodeId, Relation)>,
+    /// Every **irreflexive** relation whose two endpoints are the same position,
+    /// with how it arose. Under the stated all-pairs reading of grouped
+    /// operands, `p -> (p + Gate)` declares `p -> p` just as surely as `p -> p`
+    /// does, so neither is silently erased. `Coexist` is excluded because it is
+    /// reflexive — "p coexists with p" is vacuously true and derives no
+    /// obligation, whereas p containing, feeding, or provisioning itself is a
+    /// contradiction however it was written.
+    self_relations: Vec<SelfRelation>,
     /// Aliases reached both under and outside a `× N` replication. One node
     /// cannot be both a singleton position and a replicated one; until runtime
     /// instances exist the compiler refuses the ambiguity instead of folding it
@@ -198,6 +248,72 @@ pub struct ResolvedGraph {
     /// Why each activated binding is part of the architecture. Serialized, so
     /// activation provenance is explainable rather than a private map.
     activation_origins: BTreeMap<(PatternKind, String), BTreeSet<ActivationOrigin>>,
+    /// The same, for singleton kinds — which have no id namespace and so could
+    /// not otherwise enter the inventory at all. Without this an `always_on`
+    /// Ledger would be emitted while being invisible in the proof object.
+    singleton_origins: BTreeMap<PatternKind, BTreeSet<ActivationOrigin>>,
+}
+
+/// What a component is: a singleton kind (at most one binding, no id) or one
+/// named binding of an addressable kind. Activation is expressed over these, so
+/// singletons and named bindings share one inventory.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ComponentKey {
+    Singleton(PatternKind),
+    Named { kind: PatternKind, id: String },
+}
+
+impl ComponentKey {
+    pub fn kind(&self) -> PatternKind {
+        match self {
+            ComponentKey::Singleton(k) => *k,
+            ComponentKey::Named { kind, .. } => *kind,
+        }
+    }
+
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            ComponentKey::Singleton(_) => None,
+            ComponentKey::Named { id, .. } => Some(id),
+        }
+    }
+}
+
+/// A bound component with its activation status and provenance.
+#[derive(Debug, Clone)]
+pub struct ResolvedComponent {
+    pub key: ComponentKey,
+    pub active: bool,
+    pub origins: BTreeSet<ActivationOrigin>,
+}
+
+/// A relation between a position and itself, and how it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfRelation {
+    pub node: NodeId,
+    pub relation: Relation,
+    pub origin: SelfRelationOrigin,
+}
+
+/// Whether a self-relation was written directly or produced by expanding a
+/// grouped operand. Both are declared by the surface syntax under the
+/// all-pairs reading; the distinction is reported, not used to hide one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfRelationOrigin {
+    /// Written directly between one position and itself (`p -> p`).
+    Direct,
+    /// Produced by expanding a grouped operand that also held other positions
+    /// (`p -> (p + Gate)`).
+    GroupExpansion,
+}
+
+impl SelfRelationOrigin {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SelfRelationOrigin::Direct => "direct",
+            SelfRelationOrigin::GroupExpansion => "group_expansion",
+        }
+    }
 }
 
 /// Why a binding is active — the provenance behind [`ResolvedGraph::is_active`].
@@ -209,6 +325,9 @@ pub enum ActivationOrigin {
     Uses(UseKind),
     /// Declared `always_on` in the bindings block.
     AlwaysOn,
+    /// Activated by a position naming a *variant* of this kind — a `Critic`
+    /// occurrence activating the review-only Delegate it denotes.
+    VariantSurface,
 }
 
 impl ActivationOrigin {
@@ -217,6 +336,7 @@ impl ActivationOrigin {
             ActivationOrigin::Surface => "surface".to_string(),
             ActivationOrigin::Uses(k) => format!("uses:{}", k.as_str()),
             ActivationOrigin::AlwaysOn => "always_on".to_string(),
+            ActivationOrigin::VariantSurface => "surface:critic".to_string(),
         }
     }
 }
@@ -241,8 +361,9 @@ impl ResolvedGraph {
             replication_conflicts: BTreeSet::new(),
             activation: BTreeMap::new(),
             activation_origins: BTreeMap::new(),
+            singleton_origins: BTreeMap::new(),
         };
-        g.lower(expr, false, b);
+        g.lower(expr, Multiplicity::One, b);
         // `always_on` enforcement is explicitly declared architecture: it is
         // active by declaration, and its own dependencies close like any other.
         for law in b.laws.iter().filter(|l| l.always_on) {
@@ -252,6 +373,12 @@ impl ResolvedGraph {
         if let Some(gate) = b.gate.as_ref().filter(|gt| gt.always_on) {
             g.activate_id(PatternKind::Gate, &gate.id);
             g.record_origin(PatternKind::Gate, &gate.id, ActivationOrigin::AlwaysOn);
+        }
+        // The Ledger is a singleton, so its `always_on` lands in the singleton
+        // namespace — otherwise recording (disclosure) could be emitted with no
+        // trace in the proof object.
+        if b.ledger.as_ref().is_some_and(|l| l.always_on) {
+            g.record_singleton_origin(PatternKind::Ledger, ActivationOrigin::AlwaysOn);
         }
         g.close_over_binding_references(b);
         g
@@ -274,13 +401,68 @@ impl ResolvedGraph {
     }
 
     /// Relations written explicitly between a position and itself.
-    pub fn self_relations(&self) -> &[(NodeId, Relation)] {
+    pub fn self_relations(&self) -> &[SelfRelation] {
         &self.self_relations
     }
 
     /// Aliases reached both inside and outside a replication.
     pub fn replication_conflicts(&self) -> &BTreeSet<String> {
         &self.replication_conflicts
+    }
+
+    /// Whether a singleton component (a kind with no id namespace) is part of
+    /// the architecture: some position names it, or it is declared `always_on`.
+    pub fn is_singleton_active(&self, kind: PatternKind) -> bool {
+        self.singleton_origins.contains_key(&kind)
+    }
+
+    /// Every bound component — singleton *and* named — with activation status
+    /// and provenance. This is the inventory generation should consult, and it
+    /// is what makes the serialized IR account for everything the backend can
+    /// emit (an `always_on` Ledger occupies no position and owns no binding id,
+    /// yet appears here).
+    pub fn component_inventory(&self, b: &Bindings) -> Vec<ResolvedComponent> {
+        use PatternKind::*;
+        let mut out = Vec::new();
+        // Singleton kinds, in declaration order of the bindings block.
+        let singletons: [(PatternKind, bool); 6] = [
+            (Intake, b.intake.is_some()),
+            (Verb, b.verb.is_some()),
+            (Ledger, b.ledger.is_some()),
+            (Sandbox, b.sandbox.is_some()),
+            (NightShift, b.night_shift.is_some()),
+            (Refinery, b.refinery.is_some()),
+        ];
+        for (kind, bound) in singletons {
+            if !bound {
+                continue;
+            }
+            out.push(ResolvedComponent {
+                key: ComponentKey::Singleton(kind),
+                active: self.is_singleton_active(kind),
+                origins: self
+                    .singleton_origins
+                    .get(&kind)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+        }
+        for kind in [Law, Gate, Specialist, Delegate, Pipeline, Port, Hive] {
+            for id in resolved_bindings(b, kind, None) {
+                let active = self.is_active(kind, &id);
+                let origins = self
+                    .activation_origins
+                    .get(&(kind, id.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                out.push(ResolvedComponent {
+                    key: ComponentKey::Named { kind, id },
+                    active,
+                    origins,
+                });
+            }
+        }
+        out
     }
 
     /// Every addressable binding with its activation status and provenance —
@@ -314,8 +496,8 @@ impl ResolvedGraph {
     /// a `uses` edge or `always_on` has no position but IS in the system).
     pub fn active_kinds(&self, b: &Bindings) -> BTreeSet<PatternKind> {
         let mut kinds: BTreeSet<PatternKind> = self.nodes.iter().map(|n| n.kind).collect();
-        for rb in self.binding_inventory(b).into_iter().filter(|r| r.active) {
-            kinds.insert(rb.kind);
+        for c in self.component_inventory(b).into_iter().filter(|c| c.active) {
+            kinds.insert(c.key.kind());
         }
         kinds
     }
@@ -474,23 +656,24 @@ impl ResolvedGraph {
 
     /// Recursively lower `expr`, returning the node ids of the subtree's leaf
     /// occurrences so operators can draw pairwise edges between operand groups.
-    fn lower(&mut self, expr: &Expr, replicated: bool, b: &Bindings) -> Vec<NodeId> {
+    fn lower(&mut self, expr: &Expr, mult: Multiplicity, b: &Bindings) -> Vec<NodeId> {
         match expr {
             Expr::Pattern(inst) => {
-                vec![self.intern_position(inst, inst.alias.as_deref(), replicated, b)]
+                vec![self.intern_position(inst, inst.alias.as_deref(), mult, b)]
             }
             // A reference is not a new position: it resolves to the node the
             // declaration produced (creating it if the reference was read
             // first), so every relation mentioning the alias attaches to one
             // node and a linear expression can declare a DAG.
             Expr::AliasRef { alias, target } => {
-                vec![self.intern_position(target, Some(alias), replicated, b)]
+                vec![self.intern_position(target, Some(alias), mult, b)]
             }
-            Expr::Coexist(l, r) => self.lower_pair(l, r, Relation::Coexist, replicated, b),
-            Expr::Seq(l, r) => self.lower_pair(l, r, Relation::FlowsTo, replicated, b),
-            Expr::Provision(l, r) => self.lower_pair(l, r, Relation::Provisions, replicated, b),
-            Expr::Within(l, r) => self.lower_pair(l, r, Relation::Within, replicated, b),
-            Expr::Replicate(e, _) => self.lower(e, true, b),
+            Expr::Coexist(l, r) => self.lower_pair(l, r, Relation::Coexist, mult, b),
+            Expr::Seq(l, r) => self.lower_pair(l, r, Relation::FlowsTo, mult, b),
+            Expr::Provision(l, r) => self.lower_pair(l, r, Relation::Provisions, mult, b),
+            Expr::Within(l, r) => self.lower_pair(l, r, Relation::Within, mult, b),
+            // Nested replication multiplies (see `Multiplicity::times`).
+            Expr::Replicate(e, n) => self.lower(e, mult.times(*n), b),
         }
     }
 
@@ -499,25 +682,35 @@ impl ResolvedGraph {
         l: &Expr,
         r: &Expr,
         relation: Relation,
-        replicated: bool,
+        mult: Multiplicity,
         b: &Bindings,
     ) -> Vec<NodeId> {
-        let left = self.lower(l, replicated, b);
-        let right = self.lower(r, replicated, b);
-        // An operator written directly between one position and itself (`p -> p`)
-        // is explicit syntax, not an artifact of grouping: record it so the
-        // checker can report it rather than deleting it silently.
-        if left.len() == 1 && right.len() == 1 && left[0] == right[0] {
-            self.self_relations.push((left[0], relation));
-        }
-        // All-pairs between operand groups: the stated over-approximation. A
-        // collapsed alias can put the SAME node in both groups (`Port[x as p]
-        // within Sandbox + p -> Gate` has p on each side of the `+`); a position
-        // stands in no relation to itself, so those incidental self-pairs are
-        // dropped — the explicit case was recorded above.
+        let left = self.lower(l, mult, b);
+        let right = self.lower(r, mult, b);
+        // All-pairs between operand groups: the stated over-approximation.
+        // EVERY pair whose endpoints are the same position is recorded — under
+        // the all-pairs reading, `p -> (p + Gate)` declares `p -> p` exactly as
+        // `p -> p` does, so neither is silently erased. Only the *origin*
+        // differs, and the checker reports that.
+        let direct = left.len() == 1 && right.len() == 1;
         for &from in &left {
             for &to in &right {
-                if from != to {
+                if from == to {
+                    // Reflexive relations (coexistence) carry no claim; the
+                    // irreflexive ones are contradictions and are recorded
+                    // whether written directly or produced by group expansion.
+                    if relation.is_irreflexive() {
+                        self.self_relations.push(SelfRelation {
+                            node: from,
+                            relation,
+                            origin: if direct {
+                                SelfRelationOrigin::Direct
+                            } else {
+                                SelfRelationOrigin::GroupExpansion
+                            },
+                        });
+                    }
+                } else {
                     self.edges.push(Edge { relation, from, to });
                 }
             }
@@ -536,7 +729,7 @@ impl ResolvedGraph {
         &mut self,
         inst: &PatternInstance,
         alias: Option<&str>,
-        replicated: bool,
+        mult: Multiplicity,
         b: &Bindings,
     ) -> NodeId {
         if let Some(alias) = alias {
@@ -545,26 +738,41 @@ impl ResolvedGraph {
                 .iter()
                 .position(|n| n.alias.as_deref() == Some(alias))
             {
-                if self.nodes[existing].replicated != replicated {
+                // Cardinality, not just presence: `(p × 2) + (p × 3)` is as
+                // contradictory as `p + (p × 3)`.
+                if self.nodes[existing].multiplicity != mult {
                     self.replication_conflicts.insert(alias.to_string());
                 }
                 return self.nodes[existing].id;
             }
         }
         let id = NodeId(self.nodes.len());
+        let bindings = resolved_bindings(b, inst.kind, inst.id.as_deref());
         self.nodes.push(Node {
             id,
             kind: inst.kind,
             instance: inst.id.clone(),
             alias: alias.map(str::to_string),
-            bindings: resolved_bindings(b, inst.kind, inst.id.as_deref()),
-            replicated,
+            bindings: bindings.clone(),
+            multiplicity: mult,
         });
         self.activate_occurrence(inst.kind, inst.id.as_deref());
-        for bid in resolved_bindings(b, inst.kind, inst.id.as_deref()) {
+        if bindings.is_empty() {
+            // A singleton kind has no id namespace, but the component is still
+            // activated by this position and must carry provenance.
+            self.record_singleton_origin(inst.kind, ActivationOrigin::Surface);
+        }
+        for bid in bindings {
             self.record_origin(inst.kind, &bid, ActivationOrigin::Surface);
         }
         id
+    }
+
+    fn record_singleton_origin(&mut self, kind: PatternKind, origin: ActivationOrigin) {
+        self.singleton_origins
+            .entry(kind)
+            .or_default()
+            .insert(origin);
     }
 
     fn record_origin(&mut self, kind: PatternKind, id: &str, origin: ActivationOrigin) {
@@ -602,6 +810,15 @@ impl ResolvedGraph {
                 };
                 if applies {
                     self.activate_occurrence(PatternKind::Delegate, Some(&dg.id));
+                    // The Critic is the review-only Delegate variant: record WHY
+                    // this delegate is active, or the inventory would show it
+                    // active with an empty provenance set.
+                    let id = dg.id.clone();
+                    self.record_origin(
+                        PatternKind::Delegate,
+                        &id,
+                        ActivationOrigin::VariantSurface,
+                    );
                 }
             }
         }
@@ -933,6 +1150,132 @@ platform: { type: claude-code }
     }
 
     #[test]
+    fn replication_cardinality_is_part_of_the_ir() {
+        // `× 2` and `× 20` are different systems and must not lower alike.
+        let two = ResolvedGraph::resolve(&parse("Delegate × 2").unwrap(), &bindings(TWO_PORTS));
+        let twenty = ResolvedGraph::resolve(&parse("Delegate × 20").unwrap(), &bindings(TWO_PORTS));
+        assert_eq!(two.nodes()[0].multiplicity, Multiplicity::Exact(2));
+        assert_eq!(twenty.nodes()[0].multiplicity, Multiplicity::Exact(20));
+
+        // Nested replication multiplies: three groups of two.
+        let nested =
+            ResolvedGraph::resolve(&parse("(Delegate × 2) × 3").unwrap(), &bindings(TWO_PORTS));
+        assert_eq!(nested.nodes()[0].multiplicity, Multiplicity::Exact(6));
+    }
+
+    #[test]
+    fn differing_exact_multiplicities_conflict() {
+        // Booleans could not see this: both sides were merely "replicated".
+        let g = ResolvedGraph::resolve(
+            &parse("(Delegate[worker as p] × 2) + (p × 3)").unwrap(),
+            &bindings(
+                r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "unused" }
+bindings:
+  delegates:
+    - { id: worker, agent: a.md, contract_schema: s.json, tools: [Read] }
+platform: { type: claude-code }
+"#,
+            ),
+        );
+        assert!(g.replication_conflicts().contains("p"));
+    }
+
+    #[test]
+    fn a_grouped_self_relation_is_recorded_too() {
+        // Under the all-pairs reading `p -> (p + Gate)` declares `p -> p`; it
+        // must not vanish merely because the operand held another node.
+        let g = ResolvedGraph::resolve(
+            &parse("Port[staging as p] -> (p + Gate)").unwrap(),
+            &bindings(TWO_PORTS),
+        );
+        let sr = g.self_relations();
+        assert_eq!(sr.len(), 1);
+        assert_eq!(sr[0].origin, SelfRelationOrigin::GroupExpansion);
+        assert_eq!(sr[0].relation, Relation::FlowsTo);
+
+        // ...and the direct form is still distinguished.
+        let direct = ResolvedGraph::resolve(
+            &parse("Port[staging as q] -> q").unwrap(),
+            &bindings(TWO_PORTS),
+        );
+        // Coexistence is reflexive: a reference appearing in both operands of a
+        // `+` is how one position joins two statements, and declares nothing
+        // false — so it is not reported.
+        let plus = ResolvedGraph::resolve(
+            &parse("(Port[staging as r] within Sandbox) + (r -> Gate)").unwrap(),
+            &bindings(TWO_PORTS),
+        );
+        assert!(plus.self_relations().is_empty());
+        assert_eq!(
+            direct.self_relations()[0].origin,
+            SelfRelationOrigin::Direct
+        );
+    }
+
+    #[test]
+    fn singleton_components_carry_activation_and_provenance() {
+        // A Ledger has no binding id, so it could not enter an id-keyed
+        // inventory at all — yet the backend emits it.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "unused" }
+bindings:
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+    always_on: true
+  verb: { name: v, command: c.md, accepts: A, produces: B }
+platform: { type: claude-code }
+"#;
+        let b = bindings(yaml);
+        // The Ledger appears in NO position, and is active only by declaration.
+        let g = ResolvedGraph::resolve(&parse("Verb").unwrap(), &b);
+        assert!(g.is_singleton_active(PatternKind::Ledger));
+        let inv = g.component_inventory(&b);
+        let ledger = inv
+            .iter()
+            .find(|c| c.key == ComponentKey::Singleton(PatternKind::Ledger))
+            .expect("singleton is in the inventory");
+        assert!(ledger.active);
+        assert!(ledger.origins.contains(&ActivationOrigin::AlwaysOn));
+        // The Verb is active by its surface position.
+        let verb = inv
+            .iter()
+            .find(|c| c.key == ComponentKey::Singleton(PatternKind::Verb))
+            .unwrap();
+        assert!(verb.active);
+        assert!(verb.origins.contains(&ActivationOrigin::Surface));
+    }
+
+    #[test]
+    fn a_critic_position_explains_its_delegate_activation() {
+        // The Critic folds into the Delegate namespace; without provenance the
+        // delegate would show active with an empty origin set.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "unused" }
+bindings:
+  delegates:
+    - { id: reviewer, agent: a.md, contract_schema: s.json, tools: [Read], critic: true }
+platform: { type: claude-code }
+"#;
+        let b = bindings(yaml);
+        let g = ResolvedGraph::resolve(&parse("Critic").unwrap(), &b);
+        assert!(g.is_active(PatternKind::Delegate, "reviewer"));
+        let inv = g.component_inventory(&b);
+        let dg = inv.iter().find(|c| c.key.id() == Some("reviewer")).unwrap();
+        assert!(dg.active);
+        assert!(
+            !dg.origins.is_empty(),
+            "a Critic-activated delegate must explain itself"
+        );
+        assert!(dg.origins.contains(&ActivationOrigin::VariantSurface));
+    }
+
+    #[test]
     fn inactive_bindings_are_enumerable_from_the_ir() {
         let expr = parse("Port[staging] within Sandbox").unwrap();
         let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
@@ -1044,7 +1387,13 @@ platform: { type: claude-code }
             .iter()
             .find(|n| n.kind == PatternKind::Gate)
             .unwrap();
-        assert!(dg.replicated);
-        assert!(!gate.replicated);
+        assert_eq!(
+            dg.multiplicity,
+            Multiplicity::Exact(3),
+            "cardinality is kept"
+        );
+        assert_eq!(gate.multiplicity, Multiplicity::One);
+        assert!(dg.replicated());
+        assert!(!gate.replicated());
     }
 }

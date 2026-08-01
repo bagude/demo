@@ -115,11 +115,20 @@ Each of these is a compile **error**, verified by tests in
   `binding.unaddressable_id` (an id like `github.production` falls outside the
   grammar's `[A-Za-z0-9_-]+` alphabet — it would exist but be unnameable, so
   reference integrity holds at the lexical boundary too).
-- **`composition.duplicate_alias` / `composition.alias_shadows_binding`** — a
-  position name (`Port[github as staging_deployer]`) is an identity, so it must
-  be unique across the composition and must not shadow any binding id; the
-  grammar keywords `as`/`within` are likewise rejected as binding ids
-  (`binding.unaddressable_id`), since they could never be read back.
+- **Alias integrity** — a position name is an identity, so: it is declared
+  exactly once (a repeated declaration is a *parse* error, caught at the symbol
+  layer); it must not shadow a binding id (`composition.alias_shadows_binding`);
+  and it must not be a reserved name — a pattern kind or grammar keyword —
+  because a bare `Gate` always parses as the language construct, leaving the
+  position unreferenceable (`composition.alias_reserved_name`).
+- **`composition.self_relation`** — a relation written explicitly between one
+  position and itself (`p -> p`). An incidental self-pair from conservative
+  all-pairs lowering is dropped as noise, but explicit syntax is reported rather
+  than silently erased, since deleting it could delete a derived obligation.
+- **`composition.alias_replication_conflict`** — one position used both inside
+  and outside a `× N` replication. Until runtime instances exist a node cannot
+  be both a singleton and a replicated set, so the ambiguity is refused instead
+  of folded into a boolean.
 - **`composition.control_without_interceptor`** — a Verb composed `within` a
   Law whose enclosing occurrences resolve to no **Guard**. An Obligation Law
   records debt after the fact; it does not intercept the Verb, and "some Law
@@ -185,14 +194,24 @@ Three properties the AST alone could not provide:
   same way (`Sandbox[as worker_sandbox]`) even though it has no binding id.
   Aliases are **referenceable in relations**: a bare identifier that is not a
   pattern kind refers to the position declared with `as`
-  (`Port[github as gh] within Sandbox + gh -> Gate`), and declaration plus
-  references collapse to **one IR node** — the same position participates in
+  (`Port[github as gh] within Sandbox + gh -> Gate`), and a reference resolves
+  to the **same IR node** as its declaration — one position participating in
   every relation that mentions it, which is what lets a linear expression
   declare a DAG. Alias-addressed queries (`alias_related_to`,
   `related_to_alias`) ask relations of one position rather than a kind or a
   binding, and case law fires through alias-mediated relations exactly as
-  through direct ones. An identifier matching no kind and no alias is a parse
-  error; a reference takes no bracket clause.
+  through direct ones.
+
+  **Names survive as names.** A reference is *not* substituted with a copy of
+  its declaration: `Expr::AliasRef` stays structurally distinct from the
+  `Expr::Pattern` that declared it, so `X[b as a] + a` (declaration plus
+  reference) never becomes indistinguishable from `X[b as a] + X[b as a]` (two
+  declarations of a name that must be unique). A declaration scan runs before
+  parsing and rejects a repeated declaration at the **symbol layer** — the only
+  layer where declarations and references are still distinguishable — while
+  references resolve against that table, so a forward reference works. An
+  identifier matching no kind and no alias is a parse error; a reference takes
+  no bracket clause.
 - **Activation is explicit.** A binding is part of the compiled system only if
   the composition activates it: an anonymous `Port` activates every Port
   binding; `Port[staging]` activates exactly that one. Activation then **closes
@@ -230,10 +249,18 @@ The compiler resolves **one IR instance** and threads it through:
 `CompiledSpec` carries it, and generation reads it — so "the compiler checked a
 different interpretation than it generated" is structurally impossible. The
 same IR is **serialized into the compiled bundle** (`harness/playbook.json`
-`graph` key, and the portable `harness.manifest.json`): nodes, operator edges,
-`uses` edges with their bindings-block origins, and the inactive bindings with
-reasons. `harnessc show` prints it. The spec hash proves *identity*; the
-serialized IR makes the compiled *interpretation* auditable.
+`graph` key, and the portable `harness.manifest.json`) as a two-layer object:
+`nodes` and `position_edges` (architectural occurrences), `binding_edges` (the
+`uses` dependencies, each with the bindings-block field it was read from), and
+`bindings` — **every** addressable binding with `active` and its
+`activation_origins` (`surface`, `uses:<kind>`, `always_on`). Because the
+inventory covers active *and* inactive bindings with provenance, an `always_on`
+Law that occupies no position and has no incoming `uses` edge still appears in
+the proof object rather than being emitted invisibly. The pattern/enforcement
+summary derives from the same resolved architecture, not from surface presence,
+so a Law activated only through a dependency shows up in it. `harnessc show`
+prints all of this. The spec hash proves *identity*; the serialized IR makes the
+compiled *interpretation* auditable.
 
 ## Enforcement honesty
 
@@ -326,7 +353,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 147 tests: metamodel, checker rejections for every
+cargo test --workspace     # 152 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -362,13 +389,17 @@ generation, **and the relational case law**; binding dependencies are
 serialized, and generated from; enforcement activation is explicit
 (`always_on` or activated, else rejected); and positions carry **declared
 node identity** distinct from binding identity (`Port[github as
-staging_deployer]`, unique, shadow-checked, serialized) — and aliases are
-**referenceable in relations** (`staging_deployer -> Gate`), with declaration
-and references collapsing to one IR node and alias-addressed relational
-queries on the graph. The next step of that arc is **runtime-instance
-identity** beneath node identity (pattern kind → composition node → runtime
-instance, e.g. `run-42/staging_deployer/attempt-2`) for per-worker Gate
-approval and worker-scoped obligations. Beyond it: a
+staging_deployer]`, unique, shadow-checked, serialized); aliases are
+**referenceable in relations** (`staging_deployer -> Gate`), resolved *without
+substitution* so a declaration stays distinguishable from a reference and a
+repeated declaration is rejected at the symbol layer; and binding activation is
+a **first-class serialized part of the IR** (every binding with its status and
+provenance), so the proof object accounts for everything the backend emits. The
+next step of that arc is **runtime-instance identity** beneath node identity
+(pattern kind → composition node → runtime instance, e.g.
+`run-42/staging_deployer/attempt-2`) for per-worker Gate approval and
+worker-scoped obligations — which is also what would let one position carry a
+replication multiplicity instead of the compiler refusing the ambiguity. Beyond it: a
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a

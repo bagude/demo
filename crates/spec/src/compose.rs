@@ -28,12 +28,19 @@ use crate::model::{PatternInstance, PatternKind};
 pub enum Expr {
     /// A single pattern occurrence, possibly carrying an instance id.
     Pattern(PatternInstance),
-    /// A bare identifier referring to a position declared elsewhere with
-    /// `as` (`staging_deployer` after `Port[github as staging_deployer]`).
-    /// **Parser-internal:** [`parse`] substitutes every reference with the
-    /// declared occurrence before returning, so no `AliasRef` survives in a
-    /// tree handed to callers — downstream matches treat it as unreachable.
-    AliasRef(String),
+    /// A *reference* to a position declared elsewhere with `as`
+    /// (`staging_deployer` after `Port[github as staging_deployer]`).
+    ///
+    /// A reference stays structurally distinct from the declaration it names:
+    /// substituting a clone would make `X[b as a] + a` (declaration plus
+    /// reference) indistinguishable from `X[b as a] + X[b as a]` (two
+    /// declarations of a name that must be unique), and no later pass could
+    /// tell them apart. `target` carries the resolved declaration so every
+    /// query can read through the reference without a symbol table.
+    AliasRef {
+        alias: String,
+        target: PatternInstance,
+    },
     /// `A + B` — both coexist independently.
     Coexist(Box<Expr>, Box<Expr>),
     /// `A -> B` — A's output feeds B.
@@ -105,7 +112,9 @@ impl Expr {
             Expr::Pattern(i) => {
                 set.insert(i.kind);
             }
-            Expr::AliasRef(_) => unreachable!("AliasRef is substituted away by parse()"),
+            Expr::AliasRef { target, .. } => {
+                set.insert(target.kind);
+            }
             Expr::Coexist(a, b) | Expr::Seq(a, b) | Expr::Provision(a, b) | Expr::Within(a, b) => {
                 a.collect(set);
                 b.collect(set);
@@ -123,7 +132,7 @@ impl Expr {
     fn contains_sel(&self, sel: Sel) -> bool {
         match self {
             Expr::Pattern(i) => sel.matches(i),
-            Expr::AliasRef(_) => unreachable!("AliasRef is substituted away by parse()"),
+            Expr::AliasRef { target, .. } => sel.matches(target),
             Expr::Coexist(a, b) | Expr::Seq(a, b) | Expr::Provision(a, b) | Expr::Within(a, b) => {
                 a.contains_sel(sel) || b.contains_sel(sel)
             }
@@ -141,7 +150,7 @@ impl Expr {
 
     fn collect_within(&self, out: &mut Vec<(BTreeSet<PatternKind>, BTreeSet<PatternKind>)>) {
         match self {
-            Expr::Pattern(_) | Expr::AliasRef(_) => {}
+            Expr::Pattern(_) | Expr::AliasRef { .. } => {}
             Expr::Within(a, b) => {
                 out.push((a.patterns(), b.patterns()));
                 a.collect_within(out);
@@ -180,7 +189,7 @@ impl Expr {
                 l.is_within_sel(inner, outer) || r.is_within_sel(inner, outer)
             }
             Expr::Replicate(e, _) => e.is_within_sel(inner, outer),
-            Expr::Pattern(_) | Expr::AliasRef(_) => false,
+            Expr::Pattern(_) | Expr::AliasRef { .. } => false,
         }
     }
 
@@ -201,7 +210,7 @@ impl Expr {
                 l.flows_to_sel(from, to) || r.flows_to_sel(from, to)
             }
             Expr::Replicate(e, _) => e.flows_to_sel(from, to),
-            Expr::Pattern(_) | Expr::AliasRef(_) => false,
+            Expr::Pattern(_) | Expr::AliasRef { .. } => false,
         }
     }
 
@@ -226,7 +235,7 @@ impl Expr {
                     || r.provisions_sel(provisioner, provisioned)
             }
             Expr::Replicate(e, _) => e.provisions_sel(provisioner, provisioned),
-            Expr::Pattern(_) | Expr::AliasRef(_) => false,
+            Expr::Pattern(_) | Expr::AliasRef { .. } => false,
         }
     }
 
@@ -247,7 +256,7 @@ impl Expr {
                 l.coexist_sel(a, b) || r.coexist_sel(a, b)
             }
             Expr::Replicate(e, _) => e.coexist_sel(a, b),
-            Expr::Pattern(_) | Expr::AliasRef(_) => false,
+            Expr::Pattern(_) | Expr::AliasRef { .. } => false,
         }
     }
 
@@ -262,7 +271,7 @@ impl Expr {
             Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Provision(l, r) | Expr::Within(l, r) => {
                 l.is_replicated_sel(p) || r.is_replicated_sel(p)
             }
-            Expr::Pattern(_) | Expr::AliasRef(_) => false,
+            Expr::Pattern(_) | Expr::AliasRef { .. } => false,
         }
     }
 
@@ -319,7 +328,9 @@ impl Expr {
                     out.push(i);
                 }
             }
-            Expr::AliasRef(_) => unreachable!("AliasRef is substituted away by parse()"),
+            // A reference is the same position as its declaration, which is
+            // already enumerated; counting it again would double-count.
+            Expr::AliasRef { .. } => {}
             Expr::Coexist(a, b) | Expr::Seq(a, b) | Expr::Provision(a, b) | Expr::Within(a, b) => {
                 a.collect_kind(kind, out);
                 b.collect_kind(kind, out);
@@ -347,7 +358,9 @@ impl Expr {
                     out.push(i);
                 }
             }
-            Expr::AliasRef(_) => unreachable!("AliasRef is substituted away by parse()"),
+            // Reference-resolution already proved the target exists; the
+            // declaration itself is what reference-integrity checks.
+            Expr::AliasRef { .. } => {}
             Expr::Coexist(a, b) | Expr::Seq(a, b) | Expr::Provision(a, b) | Expr::Within(a, b) => {
                 a.collect_named(out);
                 b.collect_named(out);
@@ -459,6 +472,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Positions declared with `as`, gathered by [`scan_declarations`] before
+    /// parsing so a reference resolves the moment it is read — including a
+    /// forward reference to a declaration further right in the expression.
+    symbols: std::collections::BTreeMap<String, PatternInstance>,
 }
 
 impl Parser {
@@ -556,7 +573,16 @@ impl Parser {
                              bracket clause"
                         ));
                     }
-                    Ok(Expr::AliasRef(name))
+                    match self.symbols.get(&name) {
+                        Some(target) => Ok(Expr::AliasRef {
+                            alias: name,
+                            target: target.clone(),
+                        }),
+                        None => Err(format!(
+                            "unknown pattern or alias '{name}'; a bare identifier must be a \
+                             pattern kind or a position declared with `as` in this expression"
+                        )),
+                    }
                 }
             },
             other => Err(format!("expected a pattern or '(', got {other:?}")),
@@ -613,18 +639,24 @@ impl Parser {
 
 /// Parse a composition expression into an [`Expr`] tree.
 ///
-/// Alias references are resolved here: a bare identifier that is not a pattern
-/// kind must match a position declared with `as` somewhere in the same
-/// expression, and is substituted with that declared occurrence — so
-/// `Port[github as gh] within Sandbox + gh -> Gate` relates the SAME position
-/// to both the Sandbox and the Gate (the graph collapses same-alias leaves
-/// into one node). An identifier matching no kind and no alias is an error.
+/// Two passes, so that **names survive as names**: a declaration scan builds
+/// the symbol table (rejecting a second declaration of the same alias), then
+/// the parse resolves each reference against it. References are *not*
+/// substituted with copies of their declaration — a reference stays an
+/// [`Expr::AliasRef`], distinct from the [`Expr::Pattern`] that declared it, so
+/// later passes can still tell `X[b as a] + a` (one declaration, one reference)
+/// from `X[b as a] + X[b as a]` (two declarations of a unique name).
 pub fn parse(input: &str) -> Result<Expr, String> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
         return Err("empty composition expression".to_string());
     }
-    let mut parser = Parser { tokens, pos: 0 };
+    let symbols = scan_declarations(&tokens)?;
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        symbols,
+    };
     let expr = parser.parse_coexist()?;
     if parser.pos != parser.tokens.len() {
         return Err(format!(
@@ -632,66 +664,69 @@ pub fn parse(input: &str) -> Result<Expr, String> {
             parser.pos
         ));
     }
-    let mut declared = std::collections::BTreeMap::new();
-    collect_alias_declarations(&expr, &mut declared);
-    resolve_alias_refs(expr, &declared)
+    Ok(expr)
 }
 
-/// Every `as`-declared position in the tree, by alias.
-fn collect_alias_declarations(
-    e: &Expr,
-    out: &mut std::collections::BTreeMap<String, PatternInstance>,
-) {
-    match e {
-        Expr::Pattern(i) => {
-            if let Some(a) = &i.alias {
-                out.entry(a.clone()).or_insert_with(|| i.clone());
+/// Collect every `as`-declared position from the token stream, keyed by alias.
+///
+/// Declarations are syntactically `Kind [ id? as alias ]`, so they can be found
+/// before parsing — which is what lets a reference appear *before* the
+/// declaration it names. A repeated alias is rejected here, at the symbol
+/// layer, where declarations are still distinguishable from references.
+fn scan_declarations(
+    tokens: &[Token],
+) -> Result<std::collections::BTreeMap<String, PatternInstance>, String> {
+    let mut out: std::collections::BTreeMap<String, PatternInstance> =
+        std::collections::BTreeMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        // Kind '['
+        let Token::Ident(name) = &tokens[i] else {
+            i += 1;
+            continue;
+        };
+        let Ok(kind) = name.parse::<PatternKind>() else {
+            i += 1;
+            continue;
+        };
+        if !matches!(tokens.get(i + 1), Some(Token::LBracket)) {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 2;
+        // Optional binding id.
+        let id = match tokens.get(j) {
+            Some(Token::Ident(s)) => {
+                j += 1;
+                Some(s.clone())
+            }
+            Some(Token::Number(n)) => {
+                j += 1;
+                Some(n.to_string())
+            }
+            _ => None,
+        };
+        // Optional `as alias`.
+        if matches!(tokens.get(j), Some(Token::As)) {
+            if let Some(Token::Ident(alias)) = tokens.get(j + 1) {
+                let inst = PatternInstance {
+                    kind,
+                    id: id.clone(),
+                    alias: Some(alias.clone()),
+                };
+                if let Some(prev) = out.get(alias) {
+                    return Err(format!(
+                        "alias '{alias}' is declared more than once (first as {prev}, again as \
+                         {inst}); a position name must be declared exactly once — use a bare \
+                         `{alias}` to refer to the declared position"
+                    ));
+                }
+                out.insert(alias.clone(), inst);
             }
         }
-        Expr::AliasRef(_) => {}
-        Expr::Coexist(a, b) | Expr::Seq(a, b) | Expr::Provision(a, b) | Expr::Within(a, b) => {
-            collect_alias_declarations(a, out);
-            collect_alias_declarations(b, out);
-        }
-        Expr::Replicate(a, _) => collect_alias_declarations(a, out),
+        i = j;
     }
-}
-
-/// Substitute each [`Expr::AliasRef`] with its declared occurrence, erroring on
-/// references that match no declaration. After this pass no `AliasRef` remains.
-fn resolve_alias_refs(
-    e: Expr,
-    declared: &std::collections::BTreeMap<String, PatternInstance>,
-) -> Result<Expr, String> {
-    Ok(match e {
-        Expr::AliasRef(name) => match declared.get(&name) {
-            Some(inst) => Expr::Pattern(inst.clone()),
-            None => {
-                return Err(format!(
-                    "unknown pattern or alias '{name}'; a bare identifier must be a pattern kind \
-                     or a position declared with `as` in this expression"
-                ))
-            }
-        },
-        Expr::Pattern(i) => Expr::Pattern(i),
-        Expr::Coexist(a, b) => Expr::Coexist(
-            Box::new(resolve_alias_refs(*a, declared)?),
-            Box::new(resolve_alias_refs(*b, declared)?),
-        ),
-        Expr::Seq(a, b) => Expr::Seq(
-            Box::new(resolve_alias_refs(*a, declared)?),
-            Box::new(resolve_alias_refs(*b, declared)?),
-        ),
-        Expr::Provision(a, b) => Expr::Provision(
-            Box::new(resolve_alias_refs(*a, declared)?),
-            Box::new(resolve_alias_refs(*b, declared)?),
-        ),
-        Expr::Within(a, b) => Expr::Within(
-            Box::new(resolve_alias_refs(*a, declared)?),
-            Box::new(resolve_alias_refs(*b, declared)?),
-        ),
-        Expr::Replicate(a, n) => Expr::Replicate(Box::new(resolve_alias_refs(*a, declared)?), n),
-    })
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -821,7 +856,7 @@ mod tests {
         fn walk(e: &Expr, out: &mut Vec<(Option<String>, Option<String>)>) {
             match e {
                 Expr::Pattern(i) => out.push((i.id.clone(), i.alias.clone())),
-                Expr::AliasRef(_) => unreachable!("substituted by parse()"),
+                Expr::AliasRef { .. } => {}
                 Expr::Coexist(a, b)
                 | Expr::Seq(a, b)
                 | Expr::Provision(a, b)

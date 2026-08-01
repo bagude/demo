@@ -198,10 +198,14 @@ fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
     println!("target: {}", binding.platform());
     println!("composition: {}", s.composition.expression);
 
-    // Patterns with their honest enforcement level (weakest first is fine;
-    // sorted by name for stable output).
-    let mut patterns: Vec<spec::model::PatternKind> =
-        compiled.composition.patterns().into_iter().collect();
+    // Patterns with their honest enforcement level, derived from the RESOLVED
+    // architecture (a Law activated via a `uses` edge or `always_on` is in the
+    // system even with no surface occurrence). Sorted for stable output.
+    let mut patterns: Vec<spec::model::PatternKind> = compiled
+        .graph
+        .active_kinds(&s.bindings)
+        .into_iter()
+        .collect();
     patterns.sort_by_key(|p| p.to_string());
     println!("patterns (with enforcement):");
     for p in &patterns {
@@ -248,8 +252,21 @@ fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
             u.kind.origin()
         );
     }
-    for (kind, id) in g.inactive_bindings(&s.bindings) {
-        println!("  inactive: {kind}[{id}]  (not activated; excluded from generation)");
+    for rb in g.binding_inventory(&s.bindings) {
+        let origins: Vec<String> = rb.origins.iter().map(|o| o.as_str()).collect();
+        if rb.active {
+            println!(
+                "  active:   {}[{}]  via {}",
+                rb.kind,
+                rb.id,
+                origins.join(", ")
+            );
+        } else {
+            println!(
+                "  inactive: {}[{}]  (not activated; excluded from generation)",
+                rb.kind, rb.id
+            );
+        }
     }
 
     println!("bindings:");

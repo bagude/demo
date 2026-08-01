@@ -98,17 +98,7 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
         })
         .collect();
 
-    let mut kinds: Vec<_> = compiled.composition.patterns().into_iter().collect();
-    kinds.sort_by_key(|p| p.to_string());
-    let patterns: Vec<Value> = kinds
-        .iter()
-        .map(|p| {
-            json!({
-                "name": p.to_string(),
-                "enforcement": spec::default_enforcement_level(*p).as_str(),
-            })
-        })
-        .collect();
+    let patterns = crate::common::pattern_inventory(compiled, &Portable);
 
     let gate = spec.bindings.gate.as_ref().map(|g| {
         json!({

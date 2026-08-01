@@ -325,18 +325,64 @@ fn check_active_coverage(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Dia
 /// a position or a binding is meant).
 fn check_aliases(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>) {
     let b = &spec.bindings;
+
+    // A relation written between one position and itself is not a topology the
+    // algebra can express; it is almost certainly a mistake, and dropping it
+    // silently would drop any obligation derived from it.
+    for (node, relation) in graph.self_relations() {
+        let name = graph
+            .nodes()
+            .iter()
+            .find(|n| n.id == *node)
+            .and_then(|n| n.alias.clone())
+            .unwrap_or_else(|| "a position".to_string());
+        d.push(Diagnostic::error(
+            "composition.self_relation",
+            format!(
+                "'{name}' stands in an explicit '{}' relation to itself; a position cannot be its \
+                 own container, upstream, or provisioner",
+                relation.as_str()
+            ),
+        ));
+    }
+
+    // One position cannot be both a singleton and a replicated fan-out.
+    for alias in graph.replication_conflicts() {
+        d.push(Diagnostic::error(
+            "composition.alias_replication_conflict",
+            format!(
+                "position '{alias}' is used both inside and outside a '× N' replication; one \
+                 position cannot be both a singleton and a replicated set — declare separate \
+                 positions instead"
+            ),
+        ));
+    }
+
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for node in graph.nodes() {
         let Some(alias) = node.alias.as_deref() else {
             continue;
         };
+        // A pattern-kind spelling can never be read back as a reference:
+        // `parse_primary` resolves a bare identifier as a kind first, so
+        // `Port[github as Gate]` would declare a position nothing can name.
+        if alias.parse::<PatternKind>().is_ok() || alias == "as" || alias == "within" {
+            d.push(Diagnostic::error(
+                "composition.alias_reserved_name",
+                format!(
+                    "alias '{alias}' is a reserved name (a pattern kind or grammar keyword); a \
+                     bare '{alias}' would parse as the language construct, so the position could \
+                     never be referenced"
+                ),
+            ));
+        }
         if !seen.insert(alias) {
+            // Unreachable in practice: `parse` rejects a repeated declaration at
+            // the symbol layer, and every reference interns to the declared
+            // node. Kept as a defence-in-depth invariant on the IR itself.
             d.push(Diagnostic::error(
                 "composition.duplicate_alias",
-                format!(
-                    "alias '{alias}' is declared for more than one distinct position (conflicting \
-                     kind or binding); a position name must identify exactly one"
-                ),
+                format!("alias '{alias}' names more than one position in the resolved graph"),
             ));
         }
         if let Some(kind) = ADDRESSABLE_KINDS
@@ -1331,49 +1377,77 @@ platform: { type: claude-code }
     }
 
     #[test]
-    fn identical_redeclaration_is_one_position_not_a_duplicate() {
-        // A reference (or an identical re-declaration) collapses into the
-        // declared node; only CONFLICTING declarations are duplicate aliases.
-        let yaml = r#"
-harness: { name: n, version: 0.1.0 }
-composition:
-  expression: "Port[staging as edge] within Sandbox + Port[staging as edge] -> Gate + Law + Ledger"
-bindings:
-  sandbox: { workspace: branch, lineage: [source_revision, sandbox_id, merge_revision] }
-  laws:
-    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
-  ports:
-    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
-  gate:
-    id: g
-    boundary: before_deploy
-    checkpoint_schema: s.json
-    bind: [action_hash, repository_revision, approver]
-  ledger:
-    event_schema: e.json
-    destination: evidence/events.jsonl
-    redact: [secrets, credentials]
-platform: { type: claude-code }
-"#;
-        assert!(!codes(&check_yaml(yaml)).contains(&"composition.duplicate_alias"));
+    fn a_repeated_declaration_is_rejected_at_the_symbol_layer() {
+        // Declaration vs. reference must stay distinguishable: `X[b as a] +
+        // X[b as a]` is TWO declarations of a unique name, not a declaration
+        // plus a reference, even though both name the same binding. Rejected
+        // during parse, where declarations are still distinguishable.
+        let err = crate::compose::parse(
+            "Port[staging as edge] within Sandbox + Port[staging as edge] -> Gate",
+        )
+        .unwrap_err();
+        assert!(err.contains("declared more than once"), "{err}");
+
+        // A conflicting re-declaration is the same error at the same layer.
+        let err =
+            crate::compose::parse("Port[staging as edge] within Sandbox + Port[metrics as edge]")
+                .unwrap_err();
+        assert!(err.contains("declared more than once"), "{err}");
+
+        // The legitimate way to relate one position twice is a REFERENCE.
+        assert!(
+            crate::compose::parse("Port[staging as edge] within Sandbox + edge -> Gate").is_ok()
+        );
     }
 
     #[test]
-    fn duplicate_aliases_are_rejected() {
+    fn a_reserved_name_cannot_be_an_alias() {
+        // `Gate` as an alias would declare a position nothing can reference:
+        // a bare `Gate` always parses as the pattern kind.
         let yaml = r#"
 harness: { name: n, version: 0.1.0 }
 composition:
-  expression: "Port[staging as edge] within Sandbox + Port[metrics as edge]"
+  expression: "Port[staging as Gate] within Sandbox"
 bindings:
   sandbox: { workspace: branch }
   laws:
     - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
   ports:
     - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
-    - { id: metrics, server: b, write: [y], write_guard: guard-writes }
 platform: { type: claude-code }
 "#;
-        assert!(codes(&check_yaml(yaml)).contains(&"composition.duplicate_alias"));
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.alias_reserved_name"));
+    }
+
+    #[test]
+    fn an_explicit_self_relation_is_reported_not_erased() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging as p] -> p"
+bindings:
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.self_relation"));
+    }
+
+    #[test]
+    fn an_alias_used_across_replication_contexts_is_rejected() {
+        // One position cannot be both a singleton and a replicated set.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Delegate[worker as w] + (w × 3)"
+bindings:
+  delegates:
+    - { id: worker, agent: a.md, contract_schema: s.json, tools: [Read] }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.alias_replication_conflict"));
     }
 
     #[test]

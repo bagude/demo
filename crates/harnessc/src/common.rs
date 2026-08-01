@@ -115,7 +115,10 @@ pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
             })
         })
         .collect();
-    let mut edges: Vec<Value> = g
+    // Two layers, two collections. Position edges relate architectural
+    // occurrences (node ids); binding edges relate implementations (kind + id).
+    // A single heterogeneous array would need a tagged union to validate.
+    let position_edges: Vec<Value> = g
         .edges()
         .iter()
         .map(|e| {
@@ -123,27 +126,67 @@ pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
                 "relation": e.relation.as_str(),
                 "from": e.from.0,
                 "to": e.to.0,
-                "origin": "surface",
             })
         })
         .collect();
-    edges.extend(g.uses().iter().map(|u| {
-        json!({
-            "relation": "uses",
-            "kind": u.kind.as_str(),
-            "from_binding": { "pattern": u.from.0.to_string(), "id": u.from.1 },
-            "to_binding": { "pattern": u.to.0.to_string(), "id": u.to.1 },
-            "origin": u.kind.origin(),
-        })
-    }));
-    let inactive: Vec<Value> = g
-        .inactive_bindings(&compiled.spec.bindings)
-        .into_iter()
-        .map(|(kind, id)| {
-            json!({ "pattern": kind.to_string(), "id": id, "reason": "not activated" })
+    let binding_edges: Vec<Value> = g
+        .uses()
+        .iter()
+        .map(|u| {
+            json!({
+                "relation": "uses",
+                "kind": u.kind.as_str(),
+                "from": { "pattern": u.from.0.to_string(), "id": u.from.1 },
+                "to": { "pattern": u.to.0.to_string(), "id": u.to.1 },
+                "origin": u.kind.origin(),
+            })
         })
         .collect();
-    json!({ "nodes": nodes, "edges": edges, "inactive_bindings": inactive })
+    // Every addressable binding, active or not, with WHY it is active. An
+    // `always_on` Law that occupies no position and has no incoming `uses`
+    // edge appears here — so the serialized IR accounts for everything the
+    // backend may emit, not only what the surface expression mentioned.
+    let bindings: Vec<Value> = g
+        .binding_inventory(&compiled.spec.bindings)
+        .into_iter()
+        .map(|rb| {
+            let origins: Vec<String> = rb.origins.iter().map(|o| o.as_str()).collect();
+            json!({
+                "pattern": rb.kind.to_string(),
+                "id": rb.id,
+                "active": rb.active,
+                "activation_origins": origins,
+            })
+        })
+        .collect();
+    json!({
+        "nodes": nodes,
+        "position_edges": position_edges,
+        "binding_edges": binding_edges,
+        "bindings": bindings,
+    })
+}
+
+/// The pattern kinds of the compiled architecture with their enforcement
+/// levels, derived from the **resolved graph** rather than from surface
+/// presence: a Law activated only through a `uses` edge or `always_on` is part
+/// of the system and must appear in the enforcement summary.
+pub fn pattern_inventory(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) -> Vec<Value> {
+    let mut kinds: Vec<_> = compiled
+        .graph
+        .active_kinds(&compiled.spec.bindings)
+        .into_iter()
+        .collect();
+    kinds.sort_by_key(|p| p.to_string());
+    kinds
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.to_string(),
+                "enforcement": binding.enforcement_level(*p).as_str(),
+            })
+        })
+        .collect()
 }
 
 pub fn ensure_trailing_slash(s: &str) -> String {

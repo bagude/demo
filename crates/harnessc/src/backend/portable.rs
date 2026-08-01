@@ -44,6 +44,7 @@ impl Backend for Portable {
 
         files.push(manifest(&prov, compiled));
         files.extend(hook_files(&prov, spec));
+        files.push(protected_file(&prov));
         // Schemas placed under a flat schemas/ dir — the backend owns layout.
         files.push(prov.json_file("schemas/task-packet.schema.json", task_packet_schema()));
         files.push(prov.json_file("schemas/checkpoint.schema.json", checkpoint_schema()));
@@ -146,15 +147,17 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
             "enforce-file-scope" => (
                 "hooks/enforce_file_scope.sh",
                 format!(
-                    "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool --packet \"${{ACTIVE_PACKET:-{packet}}}\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\"\n",
+                    "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope (with self-protection).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool --packet \"${{ACTIVE_PACKET:-{packet}}}\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --protected \"enforcement.protected\"\n",
                     header = prov.hash_header(),
+                    playbook = prov.spec_hash,
                 ),
             ),
             "require-validation" => (
                 "hooks/require_validation.sh",
                 format!(
-                    "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\"\n",
+                    "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"\n",
                     header = prov.hash_header(),
+                    playbook = prov.spec_hash,
                 ),
             ),
             _ => continue,
@@ -179,7 +182,38 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
             ),
         });
     }
+
+    // Self-protection Bash hook.
+    out.push(GenFile {
+        path: "hooks/protect_enforcement.sh".to_string(),
+        content: format!(
+            "#!/usr/bin/env bash\n{header}# Self-protection: block destructive Bash against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash --packet \"${{ACTIVE_PACKET:-{packet}}}\" --protected \"enforcement.protected\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"\n",
+            header = prov.hash_header(),
+            playbook = prov.spec_hash,
+        ),
+    });
     out
+}
+
+fn protected_file(prov: &Prov) -> GenFile {
+    let mut body = prov.hash_header();
+    body.push_str("# Protected enforcement artifacts (portable layout). A write requires a task\n");
+    body.push_str(
+        "# packet with amends_enforcement = true (an explicit, auditable Intake grant).\n",
+    );
+    for p in [
+        "harness.patterns.yaml",
+        "hooks/",
+        "schemas/",
+        "harness.manifest.json",
+    ] {
+        body.push_str(p);
+        body.push('\n');
+    }
+    GenFile {
+        path: "enforcement.protected".to_string(),
+        content: body,
+    }
 }
 
 fn readme(prov: &Prov, spec_hash: &str) -> GenFile {

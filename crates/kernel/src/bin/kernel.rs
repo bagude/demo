@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kernel::clock::now_rfc3339;
 use kernel::event::{Decision, Event, EventLog};
 use kernel::gate::{Checkpoint, GateStore, Preconditions};
-use kernel::law::enforce_file_scope;
+use kernel::law::{enforce, Enforcement};
 use kernel::packet::TaskPacket;
 
 #[derive(Parser)]
@@ -42,6 +42,28 @@ enum Command {
         /// Correlation id for the run.
         #[arg(long, default_value = "unknown")]
         run_id: String,
+        /// The Playbook (spec) content digest governing this run.
+        #[arg(long)]
+        playbook_ref: Option<String>,
+        /// File listing protected enforcement-artifact path prefixes (one per
+        /// line). Writes to these require the packet's amends_enforcement grant.
+        #[arg(long)]
+        protected: Option<PathBuf>,
+    },
+    /// Guard Law on Bash: read a proposed Bash call on stdin and block (exit 2)
+    /// a destructive command against a protected enforcement artifact unless the
+    /// active packet carries an amends_enforcement grant.
+    PreBash {
+        #[arg(long)]
+        packet: PathBuf,
+        #[arg(long)]
+        protected: PathBuf,
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
     /// Obligation Law at evaluate: record that an obligation (e.g. running the
     /// test suite) is now owed following an edit. Always allows the edit — an
@@ -54,6 +76,9 @@ enum Command {
         /// The obligation being recorded.
         #[arg(long, default_value = "require-validation")]
         obligation: String,
+        /// The Playbook (spec) content digest governing this run.
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
     /// Gate at the commit boundary: read a proposed Bash tool call on stdin and,
     /// if it is a `git commit`, block it (exit 2) while any required obligation
@@ -77,6 +102,9 @@ enum Command {
         /// "cargo test"). If it fails, nothing is discharged.
         #[arg(long)]
         check: Option<String>,
+        /// The Playbook (spec) content digest governing this run.
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
     /// Gate operations: request a checkpoint, approve it, or verify it.
     #[command(subcommand)]
@@ -101,6 +129,12 @@ enum Command {
         input_refs: Vec<String>,
         #[arg(long = "evidence-ref")]
         evidence_refs: Vec<String>,
+        /// The Playbook (spec) content digest governing this run.
+        #[arg(long)]
+        playbook_ref: Option<String>,
+        /// One execution attempt of a logical action (replay safety).
+        #[arg(long)]
+        attempt_id: Option<String>,
     },
 }
 
@@ -194,11 +228,33 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             packet,
             ledger,
             run_id,
-        } => pre_tool(&packet, ledger.as_deref(), &run_id),
+            playbook_ref,
+            protected,
+        } => pre_tool(
+            &packet,
+            ledger.as_deref(),
+            &run_id,
+            playbook_ref,
+            protected.as_deref(),
+        ),
+        Command::PreBash {
+            packet,
+            protected,
+            ledger,
+            run_id,
+            playbook_ref,
+        } => pre_bash(
+            &packet,
+            &protected,
+            ledger.as_deref(),
+            &run_id,
+            playbook_ref,
+        ),
         Command::PostTool {
             ledger,
             run_id,
             obligation,
+            playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
@@ -215,6 +271,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs: vec![],
+                playbook_ref,
+                attempt_id: None,
             };
             EventLog::at(&ledger).append(&event)?;
             Ok(ExitCode::SUCCESS)
@@ -244,6 +302,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             run_id,
             obligation,
             check,
+            playbook_ref,
         } => {
             if let Some(cmd) = &check {
                 let status = std::process::Command::new("sh")
@@ -272,6 +331,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs,
+                playbook_ref,
+                attempt_id: None,
             };
             EventLog::at(&ledger).append(&event)?;
             println!("discharged obligation '{obligation}'");
@@ -288,6 +349,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             task_id,
             input_refs,
             evidence_refs,
+            playbook_ref,
+            attempt_id,
         } => {
             let event = Event {
                 run_id,
@@ -301,6 +364,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: decision.into(),
                 evidence_refs,
+                playbook_ref,
+                attempt_id,
             };
             EventLog::at(&ledger).append(&event)?;
             Ok(ExitCode::SUCCESS)
@@ -312,8 +377,11 @@ fn pre_tool(
     packet_path: &std::path::Path,
     ledger: Option<&std::path::Path>,
     run_id: &str,
+    playbook_ref: Option<String>,
+    protected_path: Option<&std::path::Path>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let packet = load_packet(packet_path)?;
+    let protected = load_protected(protected_path)?;
 
     let mut stdin = String::new();
     std::io::stdin().read_to_string(&mut stdin)?;
@@ -324,7 +392,14 @@ fn pre_tool(
         return Ok(ExitCode::SUCCESS);
     };
 
-    let decision = enforce_file_scope(&packet, &path);
+    let verdict = enforce(&packet, &path, &protected);
+    let (decision, transition) = match &verdict {
+        Enforcement::Allow => (Decision::Allowed, "pre_tool.edit"),
+        // A distinct, auditable transition when an enforcement artifact is amended.
+        Enforcement::AllowAmendment => (Decision::Allowed, "pre_tool.enforcement_amendment"),
+        Enforcement::Deny(_) => (Decision::Denied, "pre_tool.edit"),
+    };
+
     if let Some(ledger) = ledger {
         let event = Event {
             run_id: run_id.to_string(),
@@ -333,28 +408,113 @@ fn pre_tool(
             action_id: "pre_tool".into(),
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
-            transition: "pre_tool.edit".into(),
+            transition: transition.into(),
             input_refs: vec![format!("path:{path}")],
             output_refs: vec![],
-            decision: if decision.is_allowed() {
-                Decision::Allowed
-            } else {
-                Decision::Denied
-            },
+            decision,
             evidence_refs: vec![],
+            playbook_ref,
+            attempt_id: None,
         };
         EventLog::at(ledger).append(&event)?;
     }
 
-    match decision.reason() {
-        None => Ok(ExitCode::SUCCESS),
-        Some(reason) => {
+    match verdict {
+        Enforcement::Allow => Ok(ExitCode::SUCCESS),
+        Enforcement::AllowAmendment => {
+            eprintln!(
+                "note: enforcement amendment to '{path}' authorized by amends_enforcement grant"
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Enforcement::Deny(reason) => {
             eprintln!("blocked by enforce-file-scope: {reason}");
             // Exit code 2 is Claude Code's signal to block the tool call and
             // surface stderr to the model.
             Ok(ExitCode::from(2))
         }
     }
+}
+
+fn pre_bash(
+    packet_path: &std::path::Path,
+    protected_path: &std::path::Path,
+    ledger: Option<&std::path::Path>,
+    run_id: &str,
+    playbook_ref: Option<String>,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let protected = load_protected(Some(protected_path))?;
+
+    let mut stdin = String::new();
+    std::io::stdin().read_to_string(&mut stdin).ok();
+    let command = extract_command(&stdin).unwrap_or_default();
+
+    let Some(hit) = kernel::law::bash_hits_protected(&command, &protected) else {
+        return Ok(ExitCode::SUCCESS);
+    };
+
+    // A destructive command touches a protected artifact. Allow only under an
+    // explicit amends_enforcement grant.
+    let packet = load_packet(packet_path).ok();
+    let granted = packet.map(|p| p.amends_enforcement).unwrap_or(false);
+
+    if let Some(ledger) = ledger {
+        let event = Event {
+            run_id: run_id.to_string(),
+            task_id: None,
+            parent_task_id: None,
+            action_id: "pre_bash".into(),
+            actor: "kernel".into(),
+            timestamp: now_rfc3339(),
+            transition: "pre_bash.protected".into(),
+            input_refs: vec![format!("protected:{hit}")],
+            output_refs: vec![],
+            decision: if granted {
+                Decision::Allowed
+            } else {
+                Decision::Denied
+            },
+            evidence_refs: vec![],
+            playbook_ref,
+            attempt_id: None,
+        };
+        EventLog::at(ledger).append(&event)?;
+    }
+
+    if granted {
+        eprintln!(
+            "note: destructive command on protected '{hit}' authorized by amends_enforcement"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!(
+            "blocked by self-protection: this command would destructively modify protected \
+             enforcement artifact '{hit}'. Amending enforcement requires a task packet with \
+             amends_enforcement = true."
+        );
+        Ok(ExitCode::from(2))
+    }
+}
+
+/// Load protected path prefixes from a file (one per line; `#` comments and
+/// blanks ignored). Missing file → empty set.
+fn load_protected(
+    path: Option<&std::path::Path>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let Some(path) = path else {
+        return Ok(Vec::new());
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect())
 }
 
 fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -458,18 +618,21 @@ fn load_packet(path: &std::path::Path) -> Result<TaskPacket, Box<dyn std::error:
     })
 }
 
+/// Pull the Bash command string out of a tool-call JSON payload.
+fn extract_command(stdin: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(stdin).ok()?;
+    value
+        .pointer("/tool_input/command")
+        .or_else(|| value.pointer("/command"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 /// True if the tool-call JSON on stdin is a Bash `git commit`. Heuristic: the
 /// command string contains both `git` and `commit` tokens. Documented as such;
 /// commit-alias schemes would need a richer matcher.
 fn is_git_commit(stdin: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(stdin) else {
-        return false;
-    };
-    let command = value
-        .pointer("/tool_input/command")
-        .or_else(|| value.pointer("/command"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let command = extract_command(stdin).unwrap_or_default();
     let tokens: Vec<&str> = command.split_whitespace().collect();
     tokens.contains(&"git") && tokens.contains(&"commit")
 }

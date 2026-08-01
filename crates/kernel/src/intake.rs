@@ -62,6 +62,7 @@ mod tests {
             acceptance_criteria: vec!["Row count is preserved".into()],
             submitted_by: "alice".into(),
             priority: Priority::High,
+            amends_enforcement: false,
         }
     }
 

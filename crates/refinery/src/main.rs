@@ -46,9 +46,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     println!("proposal {} written to {}", proposal.id, dir.display());
     println!(
-        "  {} lesson(s), {} spec change(s)",
+        "  {} lesson(s), {} auto-applied (monotone), {} disputed (needs human)",
         proposal.lessons.len(),
-        proposal.changes.len()
+        proposal.changes.len(),
+        proposal.disputed.len()
     );
     for lesson in &proposal.lessons {
         let tag = if lesson.auto_applied {

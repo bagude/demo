@@ -112,6 +112,7 @@ mod tests {
             acceptance_criteria: vec!["done".into()],
             submitted_by: "me".into(),
             priority: Priority::Medium,
+            amends_enforcement: false,
         };
         IntakeRecord::new(packet, "2026-07-31T00:00:00Z".into())
     }

@@ -30,6 +30,10 @@
       {
         "hooks": [
           {
+            "command": "harness/hooks/protect_enforcement.sh",
+            "type": "command"
+          },
+          {
             "command": "harness/hooks/approve_commit.sh",
             "type": "command"
           }

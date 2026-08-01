@@ -156,6 +156,7 @@ mod tests {
             acceptance_criteria: vec!["Row count is preserved after migrating".into()],
             submitted_by: "alice".into(),
             priority: Priority::High,
+            amends_enforcement: false,
         }
     }
 
@@ -215,6 +216,7 @@ mod tests {
             acceptance_criteria: vec![],
             submitted_by: String::new(),
             priority: Priority::Medium,
+            amends_enforcement: false,
         };
         let report = validate(&empty);
         // title, objective, submitted_by, acceptance_criteria, files

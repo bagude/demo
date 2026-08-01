@@ -46,6 +46,7 @@ pub mod law;
 pub mod ledger;
 pub mod obligation;
 pub mod packet;
+pub mod sign;
 pub mod validate;
 
 /// The kernel's own implementation source, embedded at compile time. Hashing
@@ -62,6 +63,7 @@ const KERNEL_SOURCE: &[&str] = &[
     include_str!("gate.rs"),
     include_str!("obligation.rs"),
     include_str!("packet.rs"),
+    include_str!("sign.rs"),
     include_str!("validate.rs"),
     include_str!("intake.rs"),
     include_str!("ledger.rs"),
@@ -115,6 +117,7 @@ pub use intake::{admit, AdmitError};
 pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};
 pub use ledger::Ledger;
 pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
+pub use sign::{approval_message, trusted_key_for, Keypair, SignError};
 pub use validate::{validate, Report, Violation};
 
 #[cfg(test)]

@@ -129,6 +129,9 @@ enum Command {
     /// Ledger chain operations: prove the append-only log's integrity.
     #[command(subcommand)]
     Ledger(LedgerCmd),
+    /// Approver key operations for signature-authenticated approvals.
+    #[command(subcommand)]
+    Key(KeyCmd),
     /// Append one event to the Ledger.
     Event {
         #[arg(long)]
@@ -190,6 +193,20 @@ enum GateCmd {
         #[arg(long)]
         ledger: Option<PathBuf>,
     },
+    /// Sign a checkpoint's canonical approval message (gate, run, action,
+    /// preconditions, anchored ledger head, expiry) with an approver's private
+    /// key. Prints the signature for `gate approve --auth signature`.
+    Sign {
+        #[arg(long)]
+        checkpoint: PathBuf,
+        /// The approver's private seed file (from `kernel key generate`).
+        #[arg(long)]
+        key: PathBuf,
+        /// The expiry the approval will carry — it is part of the signed
+        /// message, so `gate approve` must be given the same value.
+        #[arg(long)]
+        expiry: Option<String>,
+    },
     /// Record an approval against a persisted checkpoint.
     Approve {
         #[arg(long)]
@@ -205,6 +222,15 @@ enum GateCmd {
         auth_evidence: Option<String>,
         #[arg(long)]
         expiry: Option<String>,
+        /// The approver's signature over the canonical approval message
+        /// (from `gate sign`). Required — and verified before anything is
+        /// recorded — when --auth signature.
+        #[arg(long)]
+        signature: Option<String>,
+        /// Trusted-keys registry ([approvers] TOML) naming each principal's
+        /// public key. Required when --auth signature.
+        #[arg(long)]
+        trusted_keys: Option<PathBuf>,
     },
     /// Revalidate a checkpoint's approval against the current world, including
     /// any required obligations. Exits 0 if the approval still holds, 1 if it
@@ -220,6 +246,11 @@ enum GateCmd {
         /// checkpoint declares any required obligations.
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Trusted-keys registry. Required when the stored approval claims
+        /// `signature` auth: the signature is re-verified at resume, so a
+        /// rewritten checkpoint fails no matter what the file claims.
+        #[arg(long)]
+        trusted_keys: Option<PathBuf>,
     },
 }
 
@@ -233,6 +264,17 @@ enum LedgerCmd {
     Verify {
         #[arg(long)]
         ledger: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCmd {
+    /// Generate an ed25519 approver keypair: the private seed is written to
+    /// --out (mode 0600, a secret the kernel never needs), the public key is
+    /// printed for the trusted-keys registry ([approvers] table in TOML).
+    Generate {
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -458,6 +500,29 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Gate(cmd) => gate(cmd),
+        Command::Key(KeyCmd::Generate { out }) => {
+            let kp = kernel::sign::Keypair::generate()?;
+            if let Some(parent) = out.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
+            std::fs::write(&out, format!("{}\n", kp.seed_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
+            }
+            // Public key on stdout for the registry; where the secret went on
+            // stderr — never the secret itself.
+            println!("{}", kp.public_string());
+            eprintln!(
+                "private seed written to {} (mode 0600); register the public key above in the \
+                 trusted-keys [approvers] table",
+                out.display()
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Ledger(LedgerCmd::Verify { ledger }) => {
             match EventLog::at(&ledger).verify_chain() {
                 Ok(report) => {
@@ -708,18 +773,59 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
         }
+        GateCmd::Sign {
+            checkpoint,
+            key,
+            expiry,
+        } => {
+            let cp = GateStore::load(&checkpoint)?;
+            let seed = std::fs::read_to_string(&key)?;
+            let kp = kernel::sign::Keypair::from_seed_str(seed.trim())?;
+            let message = kernel::sign::approval_message(&cp, &cp.preconditions, expiry.as_deref());
+            println!("{}", kp.sign(&message));
+            Ok(ExitCode::SUCCESS)
+        }
         GateCmd::Approve {
             checkpoint,
             approver,
             auth,
             auth_evidence,
             expiry,
+            signature,
+            trusted_keys,
         } => {
             let mut cp = GateStore::load(&checkpoint)?;
+            // Signature auth is VERIFIED before anything is recorded: an
+            // approval that claims cryptographic identity must prove it here,
+            // or the record would launder a claim into a guarantee.
+            let evidence = if matches!(auth, AuthArg::Signature) {
+                let (Some(signature), Some(trusted_keys)) = (signature, trusted_keys.as_deref())
+                else {
+                    return Err("--auth signature requires --signature and --trusted-keys".into());
+                };
+                if auth_evidence.is_some() {
+                    return Err(
+                        "--auth signature takes --signature; the signature IS the evidence".into(),
+                    );
+                }
+                let public = kernel::sign::trusted_key_for(trusted_keys, &approver)?;
+                let message =
+                    kernel::sign::approval_message(&cp, &cp.preconditions, expiry.as_deref());
+                if let Err(e) = kernel::sign::verify(&public, &message, &signature) {
+                    eprintln!("approval NOT recorded: {e}");
+                    return Ok(ExitCode::FAILURE);
+                }
+                Some(signature)
+            } else {
+                if signature.is_some() {
+                    return Err("--signature requires --auth signature".into());
+                }
+                auth_evidence
+            };
             let approver = Approver {
                 principal: approver,
                 auth: auth.into(),
-                evidence: auth_evidence,
+                evidence,
             };
             let authed = approver.is_authenticated();
             cp.approve(approver, now_rfc3339(), expiry);
@@ -747,6 +853,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             action_hash,
             preconditions,
             ledger,
+            trusted_keys,
         } => {
             let cp = GateStore::load(&checkpoint)?;
             let preconds = parse_preconditions(&preconditions)?;
@@ -786,6 +893,42 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 if let Err(e) = EventLog::at(ledger).verify_anchor(head) {
                     eprintln!("gate refused: ledger integrity: {e}");
                     return Ok(ExitCode::FAILURE);
+                }
+            }
+
+            // A signature-authenticated approval is re-proved at resume. The
+            // canonical message is rebuilt from the checkpoint's CURRENT
+            // contents, so a rewrite of any covered field — action, the
+            // precondition snapshot, the anchored ledger head, the expiry —
+            // invalidates the signature no matter what the file claims. This
+            // is the custody boundary moving from disk to key: forging a
+            // resumable approval now requires the approver's private key, not
+            // write access to the checkpoint and ledger.
+            if let Some(approval) = &cp.approval {
+                if matches!(approval.approver.auth, AuthMethod::Signature) {
+                    let Some(trusted_keys) = trusted_keys.as_deref() else {
+                        return Err("approval claims signature auth; pass --trusted-keys to \
+                                    re-verify it"
+                            .into());
+                    };
+                    let Some(evidence) = &approval.approver.evidence else {
+                        eprintln!(
+                            "gate refused: signature-authenticated approval carries no \
+                             signature evidence"
+                        );
+                        return Ok(ExitCode::FAILURE);
+                    };
+                    let public =
+                        kernel::sign::trusted_key_for(trusted_keys, &approval.approver.principal)?;
+                    let message = kernel::sign::approval_message(
+                        &cp,
+                        &approval.preconditions,
+                        approval.expiry.as_deref(),
+                    );
+                    if let Err(e) = kernel::sign::verify(&public, &message, evidence) {
+                        eprintln!("gate refused: {e}");
+                        return Ok(ExitCode::FAILURE);
+                    }
                 }
             }
 

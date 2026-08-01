@@ -234,6 +234,72 @@ fn a_refused_resume_is_authorized_stage_rejected_evidence() {
 }
 
 #[test]
+fn no_packet_means_no_authorization_and_the_refusal_is_a_block() {
+    // The fail-safe that real-life testing caught: with no active packet the
+    // Guard used to exit 1 — which the hook protocol treats as a WARNING, so
+    // an unpacketed session sailed through ungoverned. Absent authorization
+    // must be a block (exit 2), and the refusal must be evidence.
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = dir.path().join("events.jsonl");
+    let missing = dir.path().join("tasks/active.json");
+
+    let mut child = std::process::Command::new(PathBuf::from(env!("CARGO_BIN_EXE_kernel")))
+        .args([
+            "pre-tool",
+            "--packet",
+            missing.to_str().unwrap(),
+            "--ledger",
+            ledger.to_str().unwrap(),
+            "--run-id",
+            "run-unpacketed",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(br#"{"tool_input": {"file_path": "src/x.rs"}}"#)
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    // Exit 2 — the BLOCK signal — not a generic error status.
+    assert_eq!(out.status.code(), Some(2), "deny must be exit 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no active task packet"), "{stderr}");
+
+    // And the refusal is chained evidence with its reason.
+    let evs = events(&ledger);
+    let denial = evs
+        .iter()
+        .find(|e| e["transition"] == "pre_tool.edit" && e["decision"] == "denied")
+        .expect("the refusal is evidence");
+    assert_eq!(denial["stage"], "authorized");
+    assert!(denial["evidence_refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r.as_str().unwrap().contains("no active task packet")));
+
+    // A tool call with no file target stays out of scope — allowed — even
+    // with no packet: the law governs file writes, not every tool.
+    let (ok, _, _) = kernel_with_stdin(
+        &[
+            "pre-tool",
+            "--packet",
+            missing.to_str().unwrap(),
+            "--run-id",
+            "run-unpacketed",
+        ],
+        r#"{"tool_input": {"query": "hello"}}"#,
+    );
+    assert!(ok, "non-file tool calls are outside the file-scope law");
+}
+
+#[test]
 fn free_form_evidence_declares_its_stage_and_defaults_to_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let ledger = dir.path().join("events.jsonl");

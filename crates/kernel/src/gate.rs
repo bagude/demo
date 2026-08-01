@@ -101,6 +101,13 @@ pub struct Checkpoint {
     /// Obligation ids that must be discharged before this Gate will resume.
     #[serde(default)]
     pub requires_obligations: Vec<String>,
+    /// The Ledger chain head at checkpoint time — the external anchor that
+    /// closes the chain's one blind spot. A hash chain proves everything
+    /// except tail truncation; a checkpoint that survives process death is
+    /// exactly the durable out-of-band place to pin the head, so at resume
+    /// the Gate can refuse a log whose history no longer contains it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_head: Option<String>,
     /// Present once a decision has been recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalBinding>,
@@ -179,6 +186,7 @@ impl Checkpoint {
             continuation: continuation.into(),
             created_at: created_at.into(),
             requires_obligations: Vec::new(),
+            ledger_head: None,
             approval: None,
         }
     }
@@ -186,6 +194,14 @@ impl Checkpoint {
     /// Declare obligations that must be discharged before this Gate resumes.
     pub fn requiring_obligations(mut self, obligations: Vec<String>) -> Self {
         self.requires_obligations = obligations;
+        self
+    }
+
+    /// Anchor the Ledger chain head this checkpoint was taken against. At
+    /// resume, a log whose history no longer contains this head — truncated or
+    /// rewritten — is refused (see `EventLog::verify_anchor`).
+    pub fn anchoring_ledger_head(mut self, head: Option<String>) -> Self {
+        self.ledger_head = head;
         self
     }
 

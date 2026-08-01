@@ -365,8 +365,10 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   compiled-interpretation digest that governed the run), so the log proves which
   constitutional version was in force. The generated hooks bake in the digest they
   compiled from. Each event additionally carries `kernel_ref`, the digest of the
-  enforcement binary that executed it — mandatory in the event schema — so the
-  record distinguishes which kernel ran, not just which spec governed.
+  enforcement binary that executed it. Both fields are **mandatory** — on the
+  event type and in the generated schema — so the record distinguishes which
+  kernel ran, not just which spec governed; an empty value is explicit legacy
+  state, never an ordinary governed event.
 - **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
   bind approval to an action hash + precondition snapshot + approver + expiry,
   and **revalidate at resume**: a changed action, drifted precondition, or
@@ -375,7 +377,10 @@ The generated hooks are thin shims; the enforcement lives in the compiled
 - **`require-validation`** (Obligation Law) — an obligation event is recorded
   after each edit, and the commit gate hook **blocks `git commit`** (exit 2)
   while it is outstanding. `kernel validate` discharges it (optionally gated on a
-  check command as evidence). This is "recorded" turned into "enforced".
+  check command as evidence). This is "recorded" turned into "enforced". Every
+  actual commit evaluation — allow or deny — is itself appended to the Ledger,
+  run-bound, with a denial naming the obligations that stood in the way: a
+  blocked commit is a governed decision, not just an exit code.
 - **Gate** — `kernel gate request|approve|verify` persist a durable checkpoint,
   bind approval to an action hash + precondition snapshot + approver + expiry,
   and **revalidate at resume**: a changed action, drifted precondition, expired

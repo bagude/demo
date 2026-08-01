@@ -527,7 +527,7 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "kernel_ref"],
+        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
         "properties": {
             "run_id": { "type": "string" },
             "task_id": { "type": "string" },
@@ -627,9 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn event_schema_requires_the_runtime_kernel_identity() {
-        // A governed event must carry which kernel executed it; the schema makes
-        // that mandatory rather than conventional.
+    fn event_schema_requires_both_run_binding_identities() {
+        // A governed event must carry which Playbook governed it AND which
+        // kernel executed it; the schema makes both mandatory rather than
+        // conventional. (Legacy records carry explicit empty strings.)
         let schema = event_schema();
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -637,6 +638,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
+        assert!(required.contains(&"playbook_ref"));
         assert!(required.contains(&"kernel_ref"));
     }
 }

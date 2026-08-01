@@ -246,8 +246,9 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         out.push(GenFile {
             path: "hooks/approve_commit.sh".to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding (per run).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding (per run).\n# Every commit evaluation is recorded to the Ledger, run-bound like any other decision.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"{requires}\n",
                 header = prov.hash_header(),
+                playbook = prov.refs.playbook_ref,
             ),
         });
     }

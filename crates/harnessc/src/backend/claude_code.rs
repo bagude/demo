@@ -349,8 +349,9 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         out.push(GenFile {
             path: APPROVE_COMMIT_HOOK.to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding (per run).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding (per run).\n# Every commit evaluation is recorded to the Ledger, run-bound like any other decision.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" --playbook-ref \"{playbook}\"{requires}\n",
                 header = prov.hash_header(),
+                playbook = prov.refs.playbook_ref,
             ),
         });
     }
@@ -642,7 +643,8 @@ fn harness_readme(prov: &Prov, refs: &Refs) -> GenFile {
            packet's write scope and logs the decision.\n\
          - `require-validation` is **enforced via the Gate**: an obligation is recorded after each \
            edit, and `approve_commit.sh` blocks `git commit` (exit 2) until it is discharged by the \
-           validation step.\n\
+           validation step. Every commit evaluation — allow or deny — is itself a run-bound Ledger \
+           event, so a blocked commit is evidence, not just an exit code.\n\
          - The `Gate` checkpoint, approval binding, and precondition revalidation are enforced by \
            the kernel's `gate` subcommands.\n\
          - **Self-protection**: the enforcement artifacts listed in `enforcement.protected` \
@@ -849,11 +851,14 @@ platform: { type: claude-code }
     }
 
     #[test]
-    fn commit_gate_hook_requires_the_obligation() {
+    fn commit_gate_hook_requires_the_obligation_and_binds_the_run() {
         let g = build();
         let hook = &find(&g, APPROVE_COMMIT_HOOK).content;
         assert!(hook.contains("pre-commit"));
         assert!(hook.contains("--require require-validation"));
+        // The commit Gate's decisions are Ledger events like any other, so the
+        // hook must bake in the run binding the way the Guard hooks do.
+        assert!(hook.contains("--playbook-ref"));
     }
 
     #[test]
@@ -922,6 +927,10 @@ platform: { type: claude-code }
         assert!(
             required.contains(&"kernel_ref"),
             "runtime identity must be mandatory in the event schema"
+        );
+        assert!(
+            required.contains(&"playbook_ref"),
+            "run binding must be mandatory in the event schema"
         );
     }
 

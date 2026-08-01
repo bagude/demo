@@ -1,12 +1,12 @@
 {
   "_generated": {
-    "compiler_ref": "sha256:64d0192947cb5db3838c0af621242b534af8fcacffae3d5e39a1957bb7355fc5",
+    "compiler_ref": "sha256:733369b246f7dcf28494aca60d2ac2b9c18427718a0b3bc73b54eda2b51aaa0b",
     "from": "harness.patterns.yaml",
     "generator": "harnessc 0.1.0",
     "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
     "ir_schema": "2",
     "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
-    "playbook_ref": "sha256:6404c65bdec1496c3817bb20aee3b9002af2d5cfea728ced0fecdf0fae92285b",
+    "playbook_ref": "sha256:e08cdf607f7b12231b8a72eb819eaae77fbf695371b7517bcae385765ed9c277",
     "source_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
   },
   "composition": "Intake -> Verb within (Law + Gate) + Ledger",
@@ -213,9 +213,9 @@
     }
   ],
   "refs": {
-    "compiler_ref": "sha256:64d0192947cb5db3838c0af621242b534af8fcacffae3d5e39a1957bb7355fc5",
+    "compiler_ref": "sha256:733369b246f7dcf28494aca60d2ac2b9c18427718a0b3bc73b54eda2b51aaa0b",
     "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
-    "playbook_ref": "sha256:6404c65bdec1496c3817bb20aee3b9002af2d5cfea728ced0fecdf0fae92285b",
+    "playbook_ref": "sha256:e08cdf607f7b12231b8a72eb819eaae77fbf695371b7517bcae385765ed9c277",
     "source_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
   },
   "version": "0.1.0"

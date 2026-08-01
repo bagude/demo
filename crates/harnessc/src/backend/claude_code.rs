@@ -89,6 +89,11 @@ impl Backend for ClaudeCode {
             files.push(gate_file(&prov, gate));
         }
         files.extend(pattern_files(&prov, compiled));
+        files.extend(common::positions_file(
+            &prov,
+            compiled,
+            "harness/positions.json",
+        ));
         files.push(playbook_manifest(&prov, compiled));
         for dir in runtime_dirs(compiled) {
             files.push(prov.gitkeep(&dir));
@@ -325,10 +330,16 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
                 scope = law.scope.as_str(),
-                packet_arg = if law.scope == spec::model::ObligationScope::Task {
-                    format!(" \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\"")
-                } else {
-                    String::new()
+                packet_arg = match law.scope {
+                    spec::model::ObligationScope::Task =>
+                        format!(" \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\""),
+                    // The instance is runtime information only the executing
+                    // occupant knows; the hook requires it from the
+                    // environment rather than inventing one.
+                    spec::model::ObligationScope::Instance =>
+                        " \\\n  --instance \"${HARNESS_INSTANCE:?instance-scoped obligation requires HARNESS_INSTANCE}\""
+                            .to_string(),
+                    _ => String::new(),
                 },
             ),
             other => format!(
@@ -909,6 +920,36 @@ platform: { type: claude-code }
         assert!(find(&g, APPROVE_COMMIT_HOOK)
             .content
             .contains("--require require-validation:run"));
+    }
+
+    #[test]
+    fn addressable_positions_compile_to_the_registry() {
+        // The compile-time → runtime bridge: aliased positions land in
+        // harness/positions.json with their multiplicity bounds, which is
+        // what the kernel validates runtime instances against.
+        const ALIASED: &str = include_str!("../../../../examples/aliased-positions.patterns.yaml");
+        let compiled = spec::compile(ALIASED, &ClaudeCode).expect("example compiles");
+        let g = ClaudeCode.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        );
+        let positions = &find(&g, "harness/positions.json").content;
+        let v: Value = serde_json::from_str(positions).unwrap();
+        let entries = v["positions"].as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|p| p["name"] == "staging_deployer" && p["multiplicity"] == 1),
+            "{positions}"
+        );
+
+        // The specimen names no addressable positions: a registry of nothing
+        // is not generated.
+        let g = build();
+        assert!(
+            !g.files.iter().any(|f| f.path == "harness/positions.json"),
+            "no addressable positions, no registry"
+        );
     }
 
     #[test]

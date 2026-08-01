@@ -1018,7 +1018,7 @@ platform:
 
     #[test]
     fn an_obligation_may_declare_any_scope() {
-        for scope in ["run", "task", "branch", "workspace", "action"] {
+        for scope in ["run", "task", "branch", "workspace", "action", "instance"] {
             let yaml = SPECIMEN.replace(
                 "    - id: require-validation\n      kind: obligation\n",
                 &format!(

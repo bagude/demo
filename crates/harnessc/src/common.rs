@@ -406,6 +406,32 @@ pub fn pattern_inventory(compiled: &spec::CompiledSpec, binding: &dyn spec::Bind
         .collect()
 }
 
+/// The compiled positions registry: the runtime-addressable positions of the
+/// resolved graph with their multiplicity bounds — the compile-time → runtime
+/// bridge for instance identity. The kernel validates a runtime instance
+/// (`<run>/<position>/<slot>`) against this file, refusing an instance of a
+/// position the architecture never declared or a replica slot beyond the
+/// declared multiplicity. `None` when the composition names no addressable
+/// positions — a registry of nothing is not generated.
+pub fn positions_file(prov: &Prov, compiled: &spec::CompiledSpec, path: &str) -> Option<GenFile> {
+    let positions = compiled.graph.addressable_positions();
+    if positions.is_empty() {
+        return None;
+    }
+    let entries: Vec<Value> = positions
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "node": p.node.0,
+                "kind": p.kind.to_string(),
+                "multiplicity": p.multiplicity,
+            })
+        })
+        .collect();
+    Some(prov.json_file(path, json!({ "positions": entries })))
+}
+
 /// The active Gate's required obligations in the form the kernel consumes:
 /// `id:scope`, with the scope read from each obligation Law's declaration.
 /// The encoding is explicit even for the default (`:run`) so a generated
@@ -559,6 +585,7 @@ pub fn checkpoint_schema() -> Value {
             "created_at": { "type": "string" },
             "requires_obligations": { "type": "array", "items": { "type": "string" } },
             "ledger_head": { "type": "string" },
+            "instance": { "type": "string" },
             "approval": {
                 "type": "object",
                 "required": ["approver", "action_hash", "approved_at"],

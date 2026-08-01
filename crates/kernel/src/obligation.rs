@@ -50,6 +50,9 @@ pub enum Scope {
     Branch,
     Workspace,
     Action,
+    /// Per runtime instance: debt keyed to the `<run>/<position>/<slot>`
+    /// occupant that opened it — a worker's debt is that worker's to clear.
+    Instance,
 }
 
 impl Scope {
@@ -60,6 +63,7 @@ impl Scope {
             "branch" => Some(Scope::Branch),
             "workspace" => Some(Scope::Workspace),
             "action" => Some(Scope::Action),
+            "instance" => Some(Scope::Instance),
             _ => None,
         }
     }
@@ -71,6 +75,7 @@ impl Scope {
             Scope::Branch => "branch",
             Scope::Workspace => "workspace",
             Scope::Action => "action",
+            Scope::Instance => "instance",
         }
     }
 }
@@ -85,6 +90,9 @@ pub struct ScopeContext {
     pub task_key: Option<String>,
     /// The current git branch, when one can be determined.
     pub branch: Option<String>,
+    /// The runtime instance asking, when the caller is one (a per-instance
+    /// Gate resuming, an instance's own worker).
+    pub instance: Option<String>,
 }
 
 /// Parse a Gate requirement as the generated hooks encode it: `id` (run
@@ -119,6 +127,10 @@ fn event_scope_key(ev: &Event, scope: Scope) -> Option<String> {
             .input_refs
             .iter()
             .find_map(|r| r.strip_prefix("path:").map(String::from)),
+        Scope::Instance => ev
+            .input_refs
+            .iter()
+            .find_map(|r| r.strip_prefix("instance:").map(String::from)),
     }
 }
 
@@ -161,6 +173,10 @@ pub fn is_outstanding(events: &[Event], id: &str, scope: Scope, ctx: &ScopeConte
         Scope::Workspace | Scope::Action => true,
         Scope::Task => ctx.task_key.as_ref().is_none_or(|k| open.contains(k)),
         Scope::Branch => ctx.branch.as_ref().is_none_or(|b| open.contains(b)),
+        // A caller that IS an instance answers for its own debt; a caller
+        // that isn't (a workspace-level commit gate) cannot prove any open
+        // instance debt is someone else's — fail-safe, it blocks.
+        Scope::Instance => ctx.instance.as_ref().is_none_or(|i| open.contains(i)),
     }
 }
 
@@ -374,6 +390,40 @@ mod tests {
         let mut all = events;
         all.push(close_b);
         assert!(!is_outstanding(&all, ID, Scope::Action, &ctx("r")));
+    }
+
+    #[test]
+    fn instance_scope_keys_debt_to_the_worker_that_opened_it() {
+        let open_w1 = ev_full(
+            &open_transition(ID),
+            "run-1",
+            None,
+            vec!["instance:run-1/worker/1".into()],
+        );
+        let open_w2 = ev_full(
+            &open_transition(ID),
+            "run-1",
+            None,
+            vec!["instance:run-1/worker/2".into()],
+        );
+        let close_w1 = ev_full(
+            &discharge_transition(ID),
+            "run-1",
+            None,
+            vec!["instance:run-1/worker/1".into()],
+        );
+        let events = vec![open_w1, open_w2, close_w1];
+
+        let mut w1 = ctx("run-1");
+        w1.instance = Some("run-1/worker/1".into());
+        let mut w2 = ctx("run-1");
+        w2.instance = Some("run-1/worker/2".into());
+        // Worker 1 cleared its own debt; worker 2's is untouched by that.
+        assert!(!is_outstanding(&events, ID, Scope::Instance, &w1));
+        assert!(is_outstanding(&events, ID, Scope::Instance, &w2));
+        // A caller that is no instance cannot prove the open debt is someone
+        // else's: fail-safe.
+        assert!(is_outstanding(&events, ID, Scope::Instance, &ctx("run-1")));
     }
 
     #[test]

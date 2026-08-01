@@ -557,14 +557,22 @@ status and provenance; aliases are
 substitution* so a declaration stays distinguishable from a reference and a
 repeated declaration is rejected at the symbol layer; and binding activation is
 a **first-class serialized part of the IR** (every binding with its status and
-provenance), so the proof object accounts for everything the backend emits. The
-next step of that arc is **runtime-instance identity** beneath node identity
-(pattern kind → composition node → runtime instance, e.g.
-`run-42/staging_deployer/attempt-2`) for per-worker Gate approval and
-worker-scoped obligations — which is also what would let one position carry a
-replication multiplicity instead of the compiler refusing the ambiguity. Beyond it: a
-**three-level identity** model (pattern kind → composition node → runtime
-instance) for per-worker Gate approval and worker-scoped obligations; a
+provenance), so the proof object accounts for everything the backend emits;
+and the identity model is **three-level** — pattern kind → composition node →
+runtime instance (`run-42/worker/2`). The graph's uniquely-nameable positions
+(alias, or an instance id owned by exactly one node) compile into a
+`positions.json` registry with their multiplicity bounds, and the kernel holds
+runtime instances to it: an instance of an undeclared position, or a replica
+slot beyond the declared multiplicity, is refused — the IR's replication
+cardinality, enforced at runtime. Gates bind per-instance (the checkpoint
+stores its instance, the v2 approval message signs over it, resume must
+present the matching instance, and the checkpoint filename hashes gate + run +
+action + instance so per-instance checkpoints never overwrite each other), and
+the obligation scope `instance` makes a worker's debt that worker's to clear.
+The instance path's third segment addresses the **replica slot**; execution
+retries deliberately stay on the event envelope's `attempt_id` — folding
+retries into identity would make "the same worker, tried again" a different
+worker. Remaining on this arc: a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
 an **online IdP protocol adapter**
 (OIDC issuance, directory sync) binding the identity authority itself to

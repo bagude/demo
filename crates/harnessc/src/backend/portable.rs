@@ -51,6 +51,11 @@ impl Backend for Portable {
         files.push(prov.json_file("schemas/task-packet.schema.json", task_packet_schema()));
         files.push(prov.json_file("schemas/checkpoint.schema.json", checkpoint_schema()));
         files.push(prov.json_file("schemas/event.schema.json", event_schema()));
+        files.extend(crate::common::positions_file(
+            &prov,
+            compiled,
+            "positions.json",
+        ));
         for dir in runtime_dirs(compiled) {
             files.push(prov.gitkeep(&dir));
         }
@@ -227,10 +232,13 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
                 format!(
                     "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit (scope '{scope}').\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --scope {scope}{packet_arg}\n",
                     scope = law.scope.as_str(),
-                    packet_arg = if law.scope == spec::model::ObligationScope::Task {
-                        format!(" --packet \"${{ACTIVE_PACKET:-{packet}}}\"")
-                    } else {
-                        String::new()
+                    packet_arg = match law.scope {
+                        spec::model::ObligationScope::Task =>
+                            format!(" --packet \"${{ACTIVE_PACKET:-{packet}}}\""),
+                        spec::model::ObligationScope::Instance =>
+                            " --instance \"${HARNESS_INSTANCE:?instance-scoped obligation requires HARNESS_INSTANCE}\""
+                                .to_string(),
+                        _ => String::new(),
                     },
                     header = prov.hash_header(),
                     playbook = prov.refs.playbook_ref,

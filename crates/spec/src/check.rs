@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 
 use crate::binding::Binding;
 use crate::compose::Expr;
-use crate::model::{LawEvent, LawKind, PatternInstance, PatternKind, SpecFile};
+use crate::model::{Bindings, LawEvent, LawKind, PatternInstance, PatternKind, SpecFile};
 
 /// Which concrete bindings a composition relation refers to.
 ///
@@ -118,6 +118,7 @@ const NON_PRECONDITION_BINDINGS: &[&str] = &["action_hash", "approver", "expiry"
 pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnostic> {
     let mut d = Vec::new();
     check_cross_reference(spec, expr, &mut d);
+    check_instance_references(spec, expr, &mut d);
     check_gate(spec, &mut d);
     check_laws(spec, binding, &mut d);
     check_ledger(spec, &mut d);
@@ -164,6 +165,127 @@ fn check_cross_reference(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) 
                 "composition.bound_but_unreferenced",
                 format!("{kind} is bound but never appears in the composition expression"),
             ));
+        }
+    }
+}
+
+/// The binding ids addressable for `kind`, or `None` if the pattern has no
+/// id-addressable binding (a singleton like Sandbox or NightShift, or the
+/// always-satisfied Playbook). The **Critic** is the review-only Delegate, so it
+/// addresses the delegate ids whose binding sets `critic: true`.
+fn addressable_ids(b: &Bindings, kind: PatternKind) -> Option<Vec<&str>> {
+    use PatternKind::*;
+    let ids: Vec<&str> = match kind {
+        Law => b.laws.iter().map(|l| l.id.as_str()).collect(),
+        Gate => b.gate.iter().map(|g| g.id.as_str()).collect(),
+        Specialist => b.specialists.iter().map(|s| s.id.as_str()).collect(),
+        Delegate => b.delegates.iter().map(|dg| dg.id.as_str()).collect(),
+        Critic => b
+            .delegates
+            .iter()
+            .filter(|dg| dg.critic)
+            .map(|dg| dg.id.as_str())
+            .collect(),
+        Pipeline => b.pipelines.iter().map(|p| p.id.as_str()).collect(),
+        Port => b.ports.iter().map(|p| p.id.as_str()).collect(),
+        Hive => b.hives.iter().map(|h| h.id.as_str()).collect(),
+        // Singleton bindings (or the always-satisfied Playbook): no id to name.
+        Intake | Verb | Ledger | Sandbox | NightShift | Refinery | Playbook => return None,
+    };
+    Some(ids)
+}
+
+/// The id namespaces that do not overlap, for reporting a kind mismatch. Critic
+/// is omitted because its ids are a subset of `Delegate`'s.
+const ADDRESSABLE_KINDS: &[PatternKind] = &[
+    PatternKind::Law,
+    PatternKind::Gate,
+    PatternKind::Specialist,
+    PatternKind::Delegate,
+    PatternKind::Pipeline,
+    PatternKind::Port,
+    PatternKind::Hive,
+];
+
+/// If `id` names a binding of some kind *other* than `exclude`, which one. Used
+/// to turn a bare "unknown instance" into the sharper "you named the wrong kind".
+fn other_kind_with_id(b: &Bindings, exclude: PatternKind, id: &str) -> Option<PatternKind> {
+    ADDRESSABLE_KINDS
+        .iter()
+        .copied()
+        .filter(|k| *k != exclude)
+        .find(|k| addressable_ids(b, *k).is_some_and(|ids| ids.contains(&id)))
+}
+
+/// Reference integrity for the composition graph.
+///
+/// Instance addressing is only sound if every named occurrence resolves to
+/// exactly one real binding. Without this, `Port[ghost] within Sandbox`
+/// compiles: the relation yields the occurrence "ghost", which matches no Port
+/// binding, so the derived isolation obligation silently attaches to nothing —
+/// a misspelled component name suppresses the very obligation instance
+/// addressing exists to enforce. This runs before composition case law so that
+/// hole is a hard error, not a silent no-op.
+fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) {
+    let b = &spec.bindings;
+
+    // Duplicate binding ids make *every* id reference ambiguous (a Port's
+    // write_guard, a Hive's worker, a named occurrence), not just addressing.
+    for (kind, label) in [
+        (PatternKind::Law, "law"),
+        (PatternKind::Specialist, "specialist"),
+        (PatternKind::Delegate, "delegate"),
+        (PatternKind::Pipeline, "pipeline"),
+        (PatternKind::Port, "port"),
+        (PatternKind::Hive, "hive"),
+    ] {
+        let Some(ids) = addressable_ids(b, kind) else {
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        let mut reported = BTreeSet::new();
+        for id in ids {
+            if !seen.insert(id) && reported.insert(id) {
+                d.push(Diagnostic::error(
+                    "binding.duplicate_id",
+                    format!(
+                        "two {label} bindings share id '{id}'; binding ids must be unique so a \
+                         named occurrence resolves to exactly one"
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Every `Kind[id]` must resolve to exactly one binding of that kind.
+    for inst in expr.named_instances() {
+        let id = inst.id.as_deref().unwrap_or_default();
+        let kind = inst.kind;
+        match addressable_ids(b, kind) {
+            None => d.push(Diagnostic::error(
+                "composition.unaddressable_pattern",
+                format!(
+                    "{kind}[{id}] names an instance, but {kind} is a singleton binding with no id \
+                     to address; drop the '[{id}]'"
+                ),
+            )),
+            Some(ids) if !ids.contains(&id) => match other_kind_with_id(b, kind, id) {
+                Some(other) => d.push(Diagnostic::error(
+                    "composition.instance_kind_mismatch",
+                    format!(
+                        "{kind}[{id}] names a {kind} occurrence, but '{id}' is a {other} binding, \
+                         not a {kind}"
+                    ),
+                )),
+                None => d.push(Diagnostic::error(
+                    "composition.unknown_instance",
+                    format!(
+                        "{kind}[{id}] resolves to no {kind} binding; a named occurrence must match \
+                         a declared binding id"
+                    ),
+                )),
+            },
+            Some(_) => {}
         }
     }
 }
@@ -908,6 +1030,114 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(codes(&check_yaml(yaml)).contains(&"composition.sandbox_port_isolation"));
+    }
+
+    #[test]
+    fn unknown_named_instance_is_rejected_not_silently_dropped() {
+        // The reviewer's fail-open case: `Port[ghost]` matches no Port binding,
+        // so without reference resolution the isolation obligation would vanish.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[ghost] within Sandbox"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: production, server: deploy, write: [release], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.unknown_instance"));
+    }
+
+    #[test]
+    fn naming_an_instance_of_a_wrong_kind_is_a_kind_mismatch() {
+        // `Port[guard-writes]` names a real id — but of a Law, not a Port.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[guard-writes] within Sandbox"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: production, server: deploy, write: [release], write_guard: guard-writes, sandboxed: propose }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.instance_kind_mismatch"));
+    }
+
+    #[test]
+    fn addressing_a_singleton_pattern_is_rejected() {
+        // Sandbox has no id field, so `Sandbox[worker]` cannot resolve.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[p] within Sandbox[worker]"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: p, server: deploy, write: [release], write_guard: guard-writes, sandboxed: propose }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.unaddressable_pattern"));
+    }
+
+    #[test]
+    fn duplicate_binding_ids_are_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[dup]"
+bindings:
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: dup, server: a, write: [x], write_guard: guard-writes }
+    - { id: dup, server: b, write: [y], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"binding.duplicate_id"));
+    }
+
+    #[test]
+    fn well_formed_named_instances_resolve_cleanly() {
+        // Both Ports name real bindings; nothing about references is flagged.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "(Port[staging] within Sandbox) -> Gate + Port[metrics] + Law + Ledger"
+bindings:
+  sandbox: { workspace: branch, lineage: [source_revision, sandbox_id, merge_revision] }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: deploy, write: [release], write_guard: guard-writes, sandboxed: propose }
+    - { id: metrics, server: obs, write: [annotate], write_guard: guard-writes }
+  gate:
+    id: g
+    boundary: before_deploy
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let c = codes(&check_yaml(yaml));
+        for bad in [
+            "composition.unknown_instance",
+            "composition.instance_kind_mismatch",
+            "composition.unaddressable_pattern",
+            "binding.duplicate_id",
+        ] {
+            assert!(!c.contains(&bad), "unexpected {bad}");
+        }
     }
 
     #[test]

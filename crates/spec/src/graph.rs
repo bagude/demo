@@ -84,6 +84,63 @@ pub struct Edge {
     pub to: NodeId,
 }
 
+impl Relation {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Relation::Within => "within",
+            Relation::FlowsTo => "flows_to",
+            Relation::Provisions => "provisions",
+            Relation::Coexist => "coexist",
+        }
+    }
+}
+
+/// Why one binding depends on another — the binding-sourced dependency kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseKind {
+    /// A Hive's `worker` field names the Delegate it spawns against.
+    HiveWorker,
+    /// A Delegate's `ports` list grants it a capability Port.
+    DelegatePort,
+    /// A Port's `write_guard` names the Law governing its writes.
+    PortGuard,
+    /// A Gate's `requires_obligations` names the obligation Laws it discharges.
+    GateObligation,
+}
+
+impl UseKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UseKind::HiveWorker => "hive_worker",
+            UseKind::DelegatePort => "delegate_port",
+            UseKind::PortGuard => "port_guard",
+            UseKind::GateObligation => "gate_obligation",
+        }
+    }
+
+    /// The bindings-block field this dependency was read from.
+    pub fn origin(&self) -> &'static str {
+        match self {
+            UseKind::HiveWorker => "hive.worker",
+            UseKind::DelegatePort => "delegate.ports",
+            UseKind::PortGuard => "port.write_guard",
+            UseKind::GateObligation => "gate.requires_obligations",
+        }
+    }
+}
+
+/// A binding-level dependency edge: `from` uses `to`. Unlike position [`Edge`]s
+/// (which relate syntactic occurrences), a `uses` edge relates *bindings* — it
+/// is read from the bindings block, not from the linear expression, and it is a
+/// first-class part of the IR so case law can ask "which Delegate uses this
+/// Port" without returning to the raw bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseEdge {
+    pub kind: UseKind,
+    pub from: (PatternKind, String),
+    pub to: (PatternKind, String),
+}
+
 /// Which bindings of one kind the composition activates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Activation {
@@ -115,6 +172,7 @@ impl Activation {
 pub struct ResolvedGraph {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
+    uses: Vec<UseEdge>,
     activation: BTreeMap<PatternKind, Activation>,
 }
 
@@ -124,9 +182,18 @@ impl ResolvedGraph {
         let mut g = ResolvedGraph {
             nodes: Vec::new(),
             edges: Vec::new(),
+            uses: Vec::new(),
             activation: BTreeMap::new(),
         };
         g.lower(expr, false, b);
+        // `always_on` enforcement is explicitly declared architecture: it is
+        // active by declaration, and its own dependencies close like any other.
+        for law in b.laws.iter().filter(|l| l.always_on) {
+            g.activate_id(PatternKind::Law, &law.id);
+        }
+        if let Some(gate) = b.gate.as_ref().filter(|gt| gt.always_on) {
+            g.activate_id(PatternKind::Gate, &gate.id);
+        }
         g.close_over_binding_references(b);
         g
     }
@@ -139,6 +206,28 @@ impl ResolvedGraph {
     /// Every typed edge.
     pub fn edges(&self) -> &[Edge] {
         &self.edges
+    }
+
+    /// Every binding-level dependency edge (`from` uses `to`), recorded while
+    /// closing activation over the bindings block.
+    pub fn uses(&self) -> &[UseEdge] {
+        &self.uses
+    }
+
+    /// The addressable bindings the composition does NOT activate, with their
+    /// kinds — the components excluded from the compiled architecture. This is
+    /// what the serialized IR reports as `inactive_bindings`.
+    pub fn inactive_bindings(&self, b: &Bindings) -> Vec<(PatternKind, String)> {
+        use PatternKind::*;
+        let mut out = Vec::new();
+        for kind in [Law, Gate, Specialist, Delegate, Pipeline, Port, Hive] {
+            for id in resolved_bindings(b, kind, None) {
+                if !self.is_active(kind, &id) {
+                    out.push((kind, id));
+                }
+            }
+        }
+        out
     }
 
     /// Whether the composition activates the binding of `kind` with this id.
@@ -327,6 +416,11 @@ impl ResolvedGraph {
             for h in &b.hives {
                 if self.is_active(PatternKind::Hive, &h.id) {
                     changed |= self.activate_id(PatternKind::Delegate, &h.worker);
+                    self.record_use(
+                        UseKind::HiveWorker,
+                        (PatternKind::Hive, &h.id),
+                        (PatternKind::Delegate, &h.worker),
+                    );
                 }
             }
             // An active Delegate activates the Ports it is granted.
@@ -334,6 +428,11 @@ impl ResolvedGraph {
                 if self.is_active(PatternKind::Delegate, &dg.id) {
                     for port in &dg.ports {
                         changed |= self.activate_id(PatternKind::Port, port);
+                        self.record_use(
+                            UseKind::DelegatePort,
+                            (PatternKind::Delegate, &dg.id),
+                            (PatternKind::Port, port),
+                        );
                     }
                 }
             }
@@ -342,6 +441,11 @@ impl ResolvedGraph {
                 if self.is_active(PatternKind::Port, &p.id) {
                     if let Some(g) = &p.write_guard {
                         changed |= self.activate_id(PatternKind::Law, g);
+                        self.record_use(
+                            UseKind::PortGuard,
+                            (PatternKind::Port, &p.id),
+                            (PatternKind::Law, g),
+                        );
                     }
                 }
             }
@@ -350,9 +454,26 @@ impl ResolvedGraph {
                 if self.is_active(PatternKind::Gate, &gate.id) {
                     for o in &gate.requires_obligations {
                         changed |= self.activate_id(PatternKind::Law, o);
+                        self.record_use(
+                            UseKind::GateObligation,
+                            (PatternKind::Gate, &gate.id),
+                            (PatternKind::Law, o),
+                        );
                     }
                 }
             }
+        }
+    }
+
+    /// Record a binding-level dependency edge exactly once.
+    fn record_use(&mut self, kind: UseKind, from: (PatternKind, &str), to: (PatternKind, &str)) {
+        let edge = UseEdge {
+            kind,
+            from: (from.0, from.1.to_string()),
+            to: (to.0, to.1.to_string()),
+        };
+        if !self.uses.contains(&edge) {
+            self.uses.push(edge);
         }
     }
 
@@ -476,6 +597,41 @@ platform: { type: claude-code }
         assert!(g.is_active(PatternKind::Delegate, "worker"));
         assert!(g.is_active(PatternKind::Port, "gh"));
         assert!(g.is_active(PatternKind::Law, "guard-writes"));
+
+        // The dependency chain is REPRESENTED, not just its activation effect:
+        // each closure step is a typed `uses` edge in the IR, so case law can
+        // ask "which Delegate uses this Port" without the raw bindings block.
+        let has = |kind: UseKind, from: (PatternKind, &str), to: (PatternKind, &str)| {
+            g.uses().iter().any(|u| {
+                u.kind == kind
+                    && u.from == (from.0, from.1.to_string())
+                    && u.to == (to.0, to.1.to_string())
+            })
+        };
+        assert!(has(
+            UseKind::HiveWorker,
+            (PatternKind::Hive, "swarm"),
+            (PatternKind::Delegate, "worker")
+        ));
+        assert!(has(
+            UseKind::DelegatePort,
+            (PatternKind::Delegate, "worker"),
+            (PatternKind::Port, "gh")
+        ));
+        assert!(has(
+            UseKind::PortGuard,
+            (PatternKind::Port, "gh"),
+            (PatternKind::Law, "guard-writes")
+        ));
+    }
+
+    #[test]
+    fn inactive_bindings_are_enumerable_from_the_ir() {
+        let expr = parse("Port[staging] within Sandbox").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let inactive = g.inactive_bindings(&bindings(TWO_PORTS));
+        assert!(inactive.contains(&(PatternKind::Port, "production".to_string())));
+        assert!(!inactive.contains(&(PatternKind::Port, "staging".to_string())));
     }
 
     #[test]

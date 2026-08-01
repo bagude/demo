@@ -212,10 +212,43 @@ fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
         );
     }
 
-    for (inner, outer) in compiled.composition.within_relations() {
-        let i: Vec<String> = inner.iter().map(|p| p.to_string()).collect();
-        let o: Vec<String> = outer.iter().map(|p| p.to_string()).collect();
-        println!("  within: {{{}}} within {{{}}}", i.join(", "), o.join(", "));
+    // The resolved IR — the exact instance that was checked and generated
+    // from: positions, operator edges, binding-sourced uses edges, and what
+    // the composition does NOT activate.
+    let g = &compiled.graph;
+    println!("graph:");
+    for n in g.nodes() {
+        let inst = n
+            .instance
+            .as_deref()
+            .map(|i| format!("[{i}]"))
+            .unwrap_or_default();
+        let repl = if n.replicated { "  (replicated)" } else { "" };
+        println!(
+            "  node {}: {}{}  bindings[{}]{}",
+            n.id.0,
+            n.kind,
+            inst,
+            n.bindings.join(", "),
+            repl
+        );
+    }
+    for e in g.edges() {
+        println!("  edge: {} -{}-> {}", e.from.0, e.relation.as_str(), e.to.0);
+    }
+    for u in g.uses() {
+        println!(
+            "  uses: {}[{}] -{}-> {}[{}]  (from {})",
+            u.from.0,
+            u.from.1,
+            u.kind.as_str(),
+            u.to.0,
+            u.to.1,
+            u.kind.origin()
+        );
+    }
+    for (kind, id) in g.inactive_bindings(&s.bindings) {
+        println!("  inactive: {kind}[{id}]  (not activated; excluded from generation)");
     }
 
     println!("bindings:");

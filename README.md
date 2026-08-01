@@ -114,6 +114,11 @@ Each of these is a compile **error**, verified by tests in
   Law whose enclosing occurrences resolve to no **Guard**. An Obligation Law
   records debt after the fact; it does not intercept the Verb, and "some Law
   binding exists" is not an interceptor.
+- **`composition.enforcement_not_activated`** — a bound Law, Gate, or Ledger
+  that nothing activates and that is not declared `always_on: true`.
+  Enforcement is never installed implicitly: surplus enforcement can block
+  permitted actions, open undischargeable obligations, deadlock a Gate, or
+  over-record — so ambiguity is rejected, not resolved by installing more.
 - **`pipeline.stage_type_mismatch`** — a Pipeline whose typed stage interfaces
   don't chain (one stage's output ≠ the next's input). That, not a fixed order,
   is what makes it a Pipeline.
@@ -166,26 +171,44 @@ Three properties the AST alone could not provide:
 - **Activation is explicit.** A binding is part of the compiled system only if
   the composition activates it: an anonymous `Port` activates every Port
   binding; `Port[staging]` activates exactly that one. Activation then **closes
-  over the references bindings make to each other** (an active Hive activates
-  its worker Delegate; an active Delegate its granted Ports; an active Port its
-  write-guard Law; an active Gate its required obligation Laws) — these are the
-  binding-sourced `uses` edges the linear expression cannot express. **The
-  backends generate only active bindings**: a `production` Port bound beside
-  `Port[staging] within Sandbox` is not wired into the Playbook, and the
-  checker says so (`composition.binding_not_activated`) rather than excluding
-  it silently. Activation also scopes case law — a bound-but-unactivated
-  obligation Law no longer becomes a Gate requirement by mere co-presence in
-  the bindings block.
+  over the references bindings make to each other**, and each closure step is a
+  **first-class `uses` edge in the IR** (`Hive -hive_worker-> Delegate`,
+  `Delegate -delegate_port-> Port`, `Port -port_guard-> Law`,
+  `Gate -gate_obligation-> Law`), carrying the bindings-block field it was read
+  from — so case law can ask *which Delegate uses this Port* without returning
+  to the raw bindings. **The backends generate only active bindings**: a
+  `production` Port bound beside `Port[staging] within Sandbox` is not wired
+  into the Playbook, and the checker says so
+  (`composition.binding_not_activated`) rather than excluding it silently.
+  Activation also scopes case law — a bound-but-unactivated obligation Law no
+  longer becomes a Gate requirement by mere co-presence in the bindings block.
 - **The over-approximation is stated.** An operator between grouped operands
   relates all pairs: `(A + B) -> (C + D)` declares all four data paths. That is
   a deliberate conservative reading (more declared paths ⇒ more derived
   obligations, never fewer), asserted by a test so it stays a stated choice.
 
-This round, activation gates the capability-bearing collections (Specialists,
-Delegates, Pipelines, Ports, Hives). The core enforcement artifacts (Laws,
-Gate, Ledger hooks) remain presence-based in generation: excluding *capability*
-is fail-safe, excluding *enforcement* would be fail-open, so the conservative
-default keeps enforcement artifacts until case law runs fully on the graph.
+Activation gates the capability-bearing collections (Specialists, Delegates,
+Pipelines, Ports, Hives) in generation. Enforcement is handled the fail-closed
+way in the *checker* instead: surplus enforcement is **not** monotonically safer
+(an unactivated Guard can block permitted actions; an unactivated Obligation
+opens debt nothing discharges; an unactivated Gate deadlocks progress; an
+unactivated Ledger records — discloses — beyond the declared system). So a bound
+Law, Gate, or Ledger must be activated by the composition, activated through a
+`uses` dependency, or explicitly declared **`always_on: true`** — anything else
+is the compile error `composition.enforcement_not_activated`, never an
+automatically installed safety surplus. Generation may then read the
+enforcement bindings directly, because the checker guarantees every one it
+reads is active or declared.
+
+The compiler resolves **one IR instance** and threads it through:
+`compile()` lowers the graph once, `check()` receives that instance, the
+`CompiledSpec` carries it, and generation reads it — so "the compiler checked a
+different interpretation than it generated" is structurally impossible. The
+same IR is **serialized into the compiled bundle** (`harness/playbook.json`
+`graph` key, and the portable `harness.manifest.json`): nodes, operator edges,
+`uses` edges with their bindings-block origins, and the inactive bindings with
+reasons. `harnessc show` prints it. The spec hash proves *identity*; the
+serialized IR makes the compiled *interpretation* auditable.
 
 ## Enforcement honesty
 
@@ -278,7 +301,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 132 tests: metamodel, checker rejections for every
+cargo test --workspace     # 135 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -309,12 +332,14 @@ fsynced; and approver identity distinguishes a *claimed* label from an
 authenticated principal.
 
 Documented follow-ups (not yet done). The graph IR drives activation,
-generation, **and the relational case law** (rules read typed edges and their
-resolved binding ids; the AST keeps only parsing, presence, and reference
-resolution). The remaining step of that arc is surface syntax for **declared
-node identity** distinct from binding identity (today two positions sharing a
-binding are distinct nodes, but they cannot yet be *named* apart, e.g.
-`staging_deployer` vs `release_annotator` both backed by `Port: github`). Beyond it: a
+generation, **and the relational case law**; binding dependencies are
+**represented as typed `uses` edges**; one IR instance is checked, carried,
+serialized, and generated from; and enforcement activation is explicit
+(`always_on` or activated, else rejected). The remaining step of that arc is
+surface syntax for **declared node identity** distinct from binding identity
+(today two positions sharing a binding are distinct nodes, but they cannot yet
+be *named* apart, e.g. `staging_deployer` vs `release_annotator` both backed by
+`Port: github`). Beyond it: a
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a

@@ -108,6 +108,14 @@ pub struct LawBinding {
     pub applies_to: Vec<String>,
     #[serde(default)]
     pub implementation: Option<String>,
+    /// Install this Law even when no composition occurrence (or binding
+    /// dependency) activates it. Enforcement is never installed implicitly: a
+    /// bound Law must be activated by the architecture or carry this explicit
+    /// declaration — otherwise it is a compile error, because surplus
+    /// enforcement can block permitted actions, open unexpected obligations,
+    /// or log more than the declared system.
+    #[serde(default)]
+    pub always_on: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +138,11 @@ pub struct GateBinding {
     /// "enforced": the Gate refuses to proceed while the obligation is open.
     #[serde(default)]
     pub requires_obligations: Vec<String>,
+    /// Install this Gate even when nothing in the composition activates it.
+    /// See `LawBinding::always_on` — an unactivated Gate would halt progress
+    /// no active workflow expects, so it must be activated or declared.
+    #[serde(default)]
+    pub always_on: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -147,6 +160,11 @@ pub struct LedgerBinding {
     pub event_schema: String,
     pub destination: String,
     pub redact: Vec<String>,
+    /// Record even when no composition occurrence references the Ledger. See
+    /// `LawBinding::always_on` — recording is disclosure, so it too must be
+    /// activated by the architecture or explicitly declared.
+    #[serde(default)]
+    pub always_on: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

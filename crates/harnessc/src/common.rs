@@ -93,6 +93,58 @@ impl Prov<'_> {
     }
 }
 
+/// Serialize the resolved composition graph — the checked IR — so the compiled
+/// bundle carries an inspectable proof object: positions, operator edges,
+/// binding-sourced `uses` edges, and the bindings the composition does NOT
+/// activate. The spec hash proves *identity*; this makes the compiled
+/// *interpretation* directly auditable.
+pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
+    let g = &compiled.graph;
+    let nodes: Vec<Value> = g
+        .nodes()
+        .iter()
+        .map(|n| {
+            json!({
+                "node_id": n.id.0,
+                "pattern": n.kind.to_string(),
+                "instance": n.instance,
+                "bindings": n.bindings,
+                "replicated": n.replicated,
+                "origin": "surface",
+            })
+        })
+        .collect();
+    let mut edges: Vec<Value> = g
+        .edges()
+        .iter()
+        .map(|e| {
+            json!({
+                "relation": e.relation.as_str(),
+                "from": e.from.0,
+                "to": e.to.0,
+                "origin": "surface",
+            })
+        })
+        .collect();
+    edges.extend(g.uses().iter().map(|u| {
+        json!({
+            "relation": "uses",
+            "kind": u.kind.as_str(),
+            "from_binding": { "pattern": u.from.0.to_string(), "id": u.from.1 },
+            "to_binding": { "pattern": u.to.0.to_string(), "id": u.to.1 },
+            "origin": u.kind.origin(),
+        })
+    }));
+    let inactive: Vec<Value> = g
+        .inactive_bindings(&compiled.spec.bindings)
+        .into_iter()
+        .map(|(kind, id)| {
+            json!({ "pattern": kind.to_string(), "id": id, "reason": "not activated" })
+        })
+        .collect();
+    json!({ "nodes": nodes, "edges": edges, "inactive_bindings": inactive })
+}
+
 pub fn ensure_trailing_slash(s: &str) -> String {
     if s.ends_with('/') {
         s.to_string()

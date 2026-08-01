@@ -451,9 +451,11 @@ fn hive_orchestrator(prov: &Prov, h: &HiveBinding) -> GenFile {
     body.push('\n');
     body.push_str(&format!(
         "# /{} — Hive orchestrator\n\nCoordinates fan-out and merge. **{:?}** fan-out; workers are \
-         `{}` delegates; results merge to `{}`.\n\n## Law of the Hive (enforced by the kernel)\n\n\
+         `{}` delegates; results merge to `{}`.\n\n## Law of the Hive (kernel-validated when invoked)\n\n\
          Every spawned task must have a parent, a contract, a budget, a depth, a termination \
-         condition, a merge destination, and a declared write scope. Before spawning, validate:\n\n\
+         condition, a merge destination, and a declared write scope. Nothing forces this \
+         invocation — the enforcement level is statically-checked, not mediated — so the required \
+         pre-spawn validation is:\n\n\
          ```sh\n\
          echo \"$SPAWN_JSON\" | kernel hive-spawn --max-depth {} --budget-remaining $REMAINING\n\
          ```\n\n\
@@ -521,6 +523,9 @@ fn playbook_manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
             "playbook_ref": prov.spec_hash,
             "composition": spec.composition.expression,
             "patterns": patterns,
+            // The checked IR itself: the compiled interpretation is auditable,
+            // not just the source identity (playbook_ref).
+            "graph": crate::common::graph_json(compiled),
         }),
     )
 }

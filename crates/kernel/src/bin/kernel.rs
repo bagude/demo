@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use kernel::clock::now_rfc3339;
 use kernel::event::{Decision, Event, EventLog};
-use kernel::gate::{Checkpoint, GateStore, Preconditions};
+use kernel::gate::{Approver, AuthMethod, Checkpoint, GateStore, Preconditions};
 use kernel::law::{enforce, Enforcement};
 use kernel::packet::TaskPacket;
 
@@ -182,6 +182,13 @@ enum GateCmd {
         checkpoint: PathBuf,
         #[arg(long)]
         approver: String,
+        /// How the approver identity was established. Defaults to `claimed`
+        /// (unauthenticated, caller-asserted) — recorded honestly as such.
+        #[arg(long, value_enum, default_value_t = AuthArg::Claimed)]
+        auth: AuthArg,
+        /// Reference to the authentication evidence (never the secret itself).
+        #[arg(long)]
+        auth_evidence: Option<String>,
         #[arg(long)]
         expiry: Option<String>,
     },
@@ -209,6 +216,23 @@ enum DecisionArg {
     Approved,
     Rejected,
     Recorded,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum AuthArg {
+    Claimed,
+    Token,
+    Signature,
+}
+
+impl From<AuthArg> for AuthMethod {
+    fn from(a: AuthArg) -> Self {
+        match a {
+            AuthArg::Claimed => AuthMethod::Claimed,
+            AuthArg::Token => AuthMethod::Token,
+            AuthArg::Signature => AuthMethod::Signature,
+        }
+    }
 }
 
 impl From<DecisionArg> for Decision {
@@ -589,9 +613,17 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
         GateCmd::Approve {
             checkpoint,
             approver,
+            auth,
+            auth_evidence,
             expiry,
         } => {
             let mut cp = GateStore::load(&checkpoint)?;
+            let approver = Approver {
+                principal: approver,
+                auth: auth.into(),
+                evidence: auth_evidence,
+            };
+            let authed = approver.is_authenticated();
             cp.approve(approver, now_rfc3339(), expiry);
             let store = GateStore::at(
                 checkpoint
@@ -599,10 +631,16 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     .unwrap_or_else(|| std::path::Path::new(".")),
             );
             store.save(&cp)?;
+            let a = cp.approval.as_ref().unwrap();
             println!(
-                "approved {} by {}",
+                "approved {} by {} ({})",
                 cp.action_hash,
-                cp.approval.as_ref().unwrap().approver
+                a.approver.principal,
+                if authed {
+                    "authenticated"
+                } else {
+                    "claimed — unauthenticated"
+                }
             );
             Ok(ExitCode::SUCCESS)
         }

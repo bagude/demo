@@ -22,10 +22,54 @@ use serde::{Deserialize, Serialize};
 /// `working_tree_hash -> "sha256:..."`).
 pub type Preconditions = BTreeMap<String, String>;
 
+/// How an approver's identity was established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    /// The caller merely asserted the name — no proof. The honest default; not
+    /// to be mistaken for authentication.
+    Claimed,
+    /// Established by a bearer token/credential (reference kept as evidence).
+    Token,
+    /// Established by a verified signature (reference kept as evidence).
+    Signature,
+}
+
+/// An approver identity that separates a display label from *how* — and
+/// whether — the identity was authenticated. Recording `Claimed` keeps the log
+/// honest: it says "the caller said this was the approver", not "this approver
+/// was authenticated".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approver {
+    /// The principal's display name or id.
+    pub principal: String,
+    /// How the identity was established.
+    pub auth: AuthMethod,
+    /// Reference to the authentication evidence — never the secret itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+impl Approver {
+    /// An unauthenticated, caller-asserted identity.
+    pub fn claimed(principal: impl Into<String>) -> Self {
+        Approver {
+            principal: principal.into(),
+            auth: AuthMethod::Claimed,
+            evidence: None,
+        }
+    }
+
+    /// Whether the identity was authenticated (anything other than `Claimed`).
+    pub fn is_authenticated(&self) -> bool {
+        !matches!(self.auth, AuthMethod::Claimed)
+    }
+}
+
 /// An approval bound to a specific action and precondition snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalBinding {
-    pub approver: String,
+    pub approver: Approver,
     /// Must equal the checkpoint's `action_hash`.
     pub action_hash: String,
     /// The precondition values the approver signed off against.
@@ -160,15 +204,16 @@ impl Checkpoint {
     }
 
     /// Record an approval against this checkpoint's current action and
-    /// preconditions.
+    /// preconditions. The `approver` carries how the identity was established;
+    /// an unauthenticated approval is recorded honestly as `Claimed`.
     pub fn approve(
         &mut self,
-        approver: impl Into<String>,
+        approver: Approver,
         approved_at: impl Into<String>,
         expiry: Option<String>,
     ) {
         self.approval = Some(ApprovalBinding {
-            approver: approver.into(),
+            approver,
             action_hash: self.action_hash.clone(),
             preconditions: self.preconditions.clone(),
             approved_at: approved_at.into(),
@@ -293,7 +338,7 @@ mod tests {
     #[test]
     fn approval_revalidates_when_nothing_moved() {
         let mut cp = checkpoint();
-        cp.approve("alice", "2026-07-31T00:00:05Z", None);
+        cp.approve(Approver::claimed("alice"), "2026-07-31T00:00:05Z", None);
         assert!(cp
             .revalidate(
                 "sha256:action-aaaa",
@@ -306,7 +351,7 @@ mod tests {
     #[test]
     fn changed_action_invalidates_approval() {
         let mut cp = checkpoint();
-        cp.approve("alice", "2026-07-31T00:00:05Z", None);
+        cp.approve(Approver::claimed("alice"), "2026-07-31T00:00:05Z", None);
         let err = cp
             .revalidate(
                 "sha256:action-DIFFERENT",
@@ -320,7 +365,7 @@ mod tests {
     #[test]
     fn precondition_drift_invalidates_approval() {
         let mut cp = checkpoint();
-        cp.approve("alice", "2026-07-31T00:00:05Z", None);
+        cp.approve(Approver::claimed("alice"), "2026-07-31T00:00:05Z", None);
         // The repository advanced between approval and resume: TOCTOU guard.
         let err = cp
             .revalidate(
@@ -336,7 +381,7 @@ mod tests {
     fn expired_approval_is_refused() {
         let mut cp = checkpoint();
         cp.approve(
-            "alice",
+            Approver::claimed("alice"),
             "2026-07-31T00:00:05Z",
             Some("2026-07-31T01:00:00Z".into()),
         );
@@ -367,10 +412,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = GateStore::at(dir.path());
         let mut cp = checkpoint();
-        cp.approve("alice", "2026-07-31T00:00:05Z", None);
+        cp.approve(Approver::claimed("alice"), "2026-07-31T00:00:05Z", None);
         let path = store.save(&cp).unwrap();
         // A different process could load this: durable suspension.
         let loaded = GateStore::load(&path).unwrap();
         assert_eq!(loaded, cp);
+    }
+
+    #[test]
+    fn claimed_identity_is_not_treated_as_authenticated() {
+        let mut cp = checkpoint();
+        cp.approve(Approver::claimed("alice"), "2026-07-31T00:00:05Z", None);
+        let approver = &cp.approval.as_ref().unwrap().approver;
+        assert_eq!(approver.principal, "alice");
+        assert!(
+            !approver.is_authenticated(),
+            "a caller-asserted name is not authentication"
+        );
+
+        let authed = Approver {
+            principal: "ci-bot".into(),
+            auth: AuthMethod::Token,
+            evidence: Some("oidc:sub=...".into()),
+        };
+        assert!(authed.is_authenticated());
     }
 }

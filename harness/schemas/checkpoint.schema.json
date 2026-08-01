@@ -22,7 +22,26 @@
           "type": "string"
         },
         "approver": {
-          "type": "string"
+          "properties": {
+            "auth": {
+              "enum": [
+                "claimed",
+                "token",
+                "signature"
+              ]
+            },
+            "evidence": {
+              "type": "string"
+            },
+            "principal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "principal",
+            "auth"
+          ],
+          "type": "object"
         },
         "expiry": {
           "type": "string"

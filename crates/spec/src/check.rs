@@ -334,8 +334,8 @@ fn check_aliases(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>
             d.push(Diagnostic::error(
                 "composition.duplicate_alias",
                 format!(
-                    "alias '{alias}' names more than one position; a position name must be unique \
-                     across the composition"
+                    "alias '{alias}' is declared for more than one distinct position (conflicting \
+                     kind or binding); a position name must identify exactly one"
                 ),
             ));
         }
@@ -1307,6 +1307,55 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(codes(&check_yaml(yaml)).contains(&"binding.unaddressable_id"));
+    }
+
+    #[test]
+    fn case_law_fires_through_an_alias_mediated_relation() {
+        // The unattended-flow relation is declared via a reference: the port
+        // position `gh` feeds the Night Shift only through `gh -> NightShift`.
+        // The replay-safety obligation must still attach to the binding.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[github as gh] within Sandbox + gh -> NightShift"
+bindings:
+  night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: github, server: gh, write: [comments], write_guard: guard-writes, sandboxed: propose }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
+    }
+
+    #[test]
+    fn identical_redeclaration_is_one_position_not_a_duplicate() {
+        // A reference (or an identical re-declaration) collapses into the
+        // declared node; only CONFLICTING declarations are duplicate aliases.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging as edge] within Sandbox + Port[staging as edge] -> Gate + Law + Ledger"
+bindings:
+  sandbox: { workspace: branch, lineage: [source_revision, sandbox_id, merge_revision] }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+  gate:
+    id: g
+    boundary: before_deploy
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        assert!(!codes(&check_yaml(yaml)).contains(&"composition.duplicate_alias"));
     }
 
     #[test]

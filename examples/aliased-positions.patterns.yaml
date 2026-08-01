@@ -1,7 +1,12 @@
 # Named positions: one implementation binding, two architectural positions.
 #
 #   (Port[github as staging_deployer] within Sandbox[as worker_sandbox])
-#     -> Gate + Port[github as release_annotator] + Law + Ledger
+#     + staging_deployer -> Gate + Port[github as release_annotator] + Law + Ledger
+#
+# Note `staging_deployer -> Gate`: a bare identifier that is not a pattern kind
+# is a REFERENCE to the position declared with `as`. Declaration and reference
+# collapse to one IR node, so the same position participates in two relations —
+# it runs within the sandbox AND feeds the Gate — without being restated.
 #
 # Both Port occurrences resolve to the SAME binding (`github`) — one MCP
 # server, one credential, one write-guard — but they occupy two different
@@ -22,7 +27,7 @@ harness:
   version: 0.1.0
 
 composition:
-  expression: "(Port[github as staging_deployer] within Sandbox[as worker_sandbox]) -> Gate + Port[github as release_annotator] + Law + Ledger"
+  expression: "(Port[github as staging_deployer] within Sandbox[as worker_sandbox]) + staging_deployer -> Gate + Port[github as release_annotator] + Law + Ledger"
 
 bindings:
   sandbox:

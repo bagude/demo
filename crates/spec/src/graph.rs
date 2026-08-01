@@ -16,10 +16,14 @@
 //!
 //! Two properties the AST alone cannot provide:
 //!
-//! 1. **Positions are preserved.** Every syntactic occurrence becomes its own
-//!    node, so `Port[github] within Sandbox + Port[github] -> Gate` is two
-//!    architectural positions sharing one binding — they are not collapsed the
-//!    way identity-deduplicated instance enumeration collapses them.
+//! 1. **Positions are preserved — and aliases identify them.** Every syntactic
+//!    occurrence becomes its own node, so `Port[github] within Sandbox +
+//!    Port[github] -> Gate` is two architectural positions sharing one binding.
+//!    The one deliberate exception is the alias: same-alias occurrences are ONE
+//!    position (`Port[github as gh] within Sandbox + gh -> Gate` collapses the
+//!    declaration and its reference into a single node participating in both
+//!    relations) — that collapse is exactly what makes a position referenceable
+//!    and lets a linear expression declare a DAG.
 //!
 //! 2. **Activation is explicit.** A binding is part of the compiled system only
 //!    if the composition *activates* it: an anonymous occurrence (`Port`)
@@ -271,6 +275,31 @@ impl ResolvedGraph {
             .find(|n| n.alias.as_deref() == Some(alias))
     }
 
+    /// Alias-addressed relation, position on the `from` side: does the position
+    /// named `alias` stand in `relation` to some position of kind `other`?
+    /// (`alias_related_to("staging_deployer", Relation::Within, Sandbox)` asks
+    /// whether that one position — not its binding, not its kind — is inside a
+    /// Sandbox.)
+    pub fn alias_related_to(&self, alias: &str, relation: Relation, other: PatternKind) -> bool {
+        let Some(node) = self.node_by_alias(alias) else {
+            return false;
+        };
+        self.edges
+            .iter()
+            .any(|e| e.relation == relation && e.from == node.id && self.node(e.to).kind == other)
+    }
+
+    /// Alias-addressed relation, position on the `to` side: does some position
+    /// of kind `other` stand in `relation` to the position named `alias`?
+    pub fn related_to_alias(&self, other: PatternKind, relation: Relation, alias: &str) -> bool {
+        let Some(node) = self.node_by_alias(alias) else {
+            return false;
+        };
+        self.edges
+            .iter()
+            .any(|e| e.relation == relation && e.to == node.id && self.node(e.from).kind == other)
+    }
+
     /// Whether some `from`-kind position stands in `relation` to some
     /// `to`-kind position (edge direction is the operator's own).
     fn kinds_related(&self, relation: Relation, from: PatternKind, to: PatternKind) -> bool {
@@ -352,6 +381,22 @@ impl ResolvedGraph {
     fn lower(&mut self, expr: &Expr, replicated: bool, b: &Bindings) -> Vec<NodeId> {
         match expr {
             Expr::Pattern(inst) => {
+                // Same-alias occurrences are ONE position: a declaration and
+                // its references (or an identical re-declaration) collapse to
+                // a single node, so every relation mentioning the alias
+                // attaches to the same architectural position. Conflicting
+                // re-declarations (same alias, different kind/binding) do NOT
+                // collapse — the checker rejects them as duplicate aliases.
+                if let Some(alias) = inst.alias.as_deref() {
+                    if let Some(existing) = self.nodes.iter().position(|n| {
+                        n.alias.as_deref() == Some(alias)
+                            && n.kind == inst.kind
+                            && n.instance == inst.id
+                    }) {
+                        self.nodes[existing].replicated |= replicated;
+                        return vec![self.nodes[existing].id];
+                    }
+                }
                 let id = NodeId(self.nodes.len());
                 self.nodes.push(Node {
                     id,
@@ -364,6 +409,7 @@ impl ResolvedGraph {
                 self.activate_occurrence(inst.kind, inst.id.as_deref());
                 vec![id]
             }
+            Expr::AliasRef(_) => unreachable!("AliasRef is substituted away by parse()"),
             Expr::Coexist(l, r) => self.lower_pair(l, r, Relation::Coexist, replicated, b),
             Expr::Seq(l, r) => self.lower_pair(l, r, Relation::FlowsTo, replicated, b),
             Expr::Provision(l, r) => self.lower_pair(l, r, Relation::Provisions, replicated, b),
@@ -383,9 +429,14 @@ impl ResolvedGraph {
         let left = self.lower(l, replicated, b);
         let right = self.lower(r, replicated, b);
         // All-pairs between operand groups: the stated over-approximation.
+        // A collapsed alias can put the SAME node in both groups (`Port[x as p]
+        // within Sandbox + p -> Gate` has p on each side of the `+`); a
+        // position stands in no relation to itself, so self-edges are dropped.
         for &from in &left {
             for &to in &right {
-                self.edges.push(Edge { relation, from, to });
+                if from != to {
+                    self.edges.push(Edge { relation, from, to });
+                }
             }
         }
         let mut all = left;
@@ -654,6 +705,29 @@ platform: { type: claude-code }
         assert_eq!(deployer.bindings, annotator.bindings, "one shared binding");
         assert_eq!(deployer.bindings, vec!["staging".to_string()]);
         assert!(g.node_by_alias("ghost").is_none());
+    }
+
+    #[test]
+    fn alias_reference_collapses_to_one_node_with_both_relations() {
+        // One declared position, referenced in a second relation: ONE node,
+        // participating in Within(Sandbox) and FlowsTo(Gate).
+        let expr = parse("Port[staging as gh] within Sandbox + gh -> Gate").unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let port_nodes = g
+            .nodes()
+            .iter()
+            .filter(|n| n.kind == PatternKind::Port)
+            .count();
+        assert_eq!(port_nodes, 1, "declaration + reference = one position");
+        assert!(g.alias_related_to("gh", Relation::Within, PatternKind::Sandbox));
+        assert!(g.alias_related_to("gh", Relation::FlowsTo, PatternKind::Gate));
+        // Direction honesty: nothing flows INTO gh from the Gate.
+        assert!(!g.related_to_alias(PatternKind::Gate, Relation::FlowsTo, "gh"));
+        // An unknown alias stands in no relation.
+        assert!(!g.alias_related_to("ghost", Relation::Within, PatternKind::Sandbox));
+        // A collapsed node appearing in both operand groups of an operator
+        // never relates to itself.
+        assert!(g.edges().iter().all(|e| e.from != e.to), "no self-edges");
     }
 
     #[test]

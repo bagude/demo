@@ -39,6 +39,7 @@
 pub mod clock;
 pub mod event;
 pub mod gate;
+pub mod hive;
 pub mod intake;
 pub mod law;
 pub mod ledger;
@@ -48,6 +49,7 @@ pub mod validate;
 
 pub use event::{Decision, Event, EventLog};
 pub use gate::{ApprovalBinding, Checkpoint, GateError, GateStore};
+pub use hive::{first_write_conflict, validate_spawn, HiveViolation, SpawnRequest};
 pub use intake::{admit, AdmitError};
 pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};
 pub use ledger::Ledger;

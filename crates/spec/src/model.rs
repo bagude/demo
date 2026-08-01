@@ -55,6 +55,18 @@ pub struct Bindings {
     pub sandbox: Option<SandboxBinding>,
     #[serde(default)]
     pub night_shift: Option<NightShiftBinding>,
+    #[serde(default)]
+    pub specialists: Vec<SpecialistBinding>,
+    #[serde(default)]
+    pub delegates: Vec<DelegateBinding>,
+    #[serde(default)]
+    pub pipelines: Vec<PipelineBinding>,
+    #[serde(default)]
+    pub ports: Vec<PortBinding>,
+    #[serde(default)]
+    pub hives: Vec<HiveBinding>,
+    #[serde(default)]
+    pub refinery: Option<RefineryBinding>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,6 +166,165 @@ pub struct NightShiftBinding {
     pub entrypoint: String,
 }
 
+/// The Specialist — Demand-Loaded Knowledge (a Skill).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpecialistBinding {
+    pub id: String,
+    /// Path to the SKILL.md that is loaded on demand.
+    pub skill: String,
+    /// When the specialist should be brought into context.
+    pub description: String,
+}
+
+/// The Delegate — a Nested Executor with a typed contract. The Critic is the
+/// review-only variant (`critic: true`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateBinding {
+    pub id: String,
+    /// Path to the subagent definition.
+    pub agent: String,
+    /// Schema the delegate's result must conform to (never unstructured prose).
+    pub contract_schema: String,
+    /// The delegated authority: tools the subagent may use. Must be a subset of
+    /// the parent's — never broader.
+    pub tools: Vec<String>,
+    /// Capability Ports this delegate may use. Each must be a declared port; a
+    /// Delegate operates under delegated authority, never broader than granted.
+    #[serde(default)]
+    pub ports: Vec<String>,
+    /// A Critic judges work it did not produce; fresh context is the point.
+    #[serde(default)]
+    pub critic: bool,
+}
+
+/// One typed stage of a Pipeline.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineStage {
+    pub name: String,
+    /// The typed artifact this stage consumes (absent for the first stage).
+    #[serde(default)]
+    pub consumes: Option<String>,
+    /// The typed artifact this stage produces (absent for the last stage).
+    #[serde(default)]
+    pub produces: Option<String>,
+}
+
+/// The Pipeline — control flow fixed at write-time, typed stage interfaces.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineBinding {
+    pub id: String,
+    pub command: String,
+    pub stages: Vec<PipelineStage>,
+}
+
+/// How a Port behaves when the workflow is sandboxed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sandboxed {
+    /// Writes target an isolated environment.
+    Isolate,
+    /// Writes are disabled.
+    Disable,
+    /// Writes become proposals awaiting acceptance.
+    Propose,
+}
+
+/// The Port — a Capability Port (MCP server) with a write-authority boundary.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortBinding {
+    pub id: String,
+    pub server: String,
+    /// Objects the port may observe.
+    #[serde(default)]
+    pub observe: Vec<String>,
+    /// Transitions the port may request (its write authority).
+    #[serde(default)]
+    pub write: Vec<String>,
+    /// Guard-law id governing writes. Required when `write` is non-empty —
+    /// connectivity without a capability boundary is ambient privilege.
+    #[serde(default)]
+    pub write_guard: Option<String>,
+    /// Reference to the credentials used (never the secret itself).
+    #[serde(default)]
+    pub credentials: Option<String>,
+    /// Whether externally consequential actions carry an idempotency key —
+    /// required for replay safety under retry/resumption/unattended runs.
+    #[serde(default)]
+    pub idempotent: bool,
+    /// How the port behaves while sandboxed. Required when composed with a Sandbox.
+    #[serde(default)]
+    pub sandboxed: Option<Sandboxed>,
+}
+
+/// How a Hive fans work out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FanOut {
+    Static,
+    Dynamic,
+    Iterative,
+}
+
+/// How concurrent Hive workers avoid clobbering a shared target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkerIsolation {
+    /// Disjoint declared write sets.
+    Disjoint,
+    /// Isolated workspaces merged by an explicit protocol.
+    Isolated,
+    /// Serialized mutation authority.
+    Serialized,
+}
+
+/// Whether Gate approval in a Hive is granted once or per worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalScope {
+    Global,
+    PerWorker,
+}
+
+/// The Hive — Delegate × N + orchestrator + budget/depth Laws + Critic. The
+/// Law of the Hive: every spawned task has a parent, contract, budget, depth,
+/// termination condition, merge destination, and declared read/write scope.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HiveBinding {
+    pub id: String,
+    pub orchestrator: String,
+    /// The delegate id whose contract every worker is spawned against.
+    pub worker: String,
+    pub fan_out: FanOut,
+    /// Total token/resource budget cap for the fan-out.
+    pub budget: u64,
+    /// Maximum recursion depth — the backstop against runaway dynamic fan-out.
+    pub max_depth: u32,
+    /// The termination condition for spawned work.
+    pub termination: String,
+    /// Where worker results are merged.
+    pub merge: String,
+    /// How workers avoid conflicting on a shared mutation target.
+    pub worker_isolation: WorkerIsolation,
+    /// Global vs. per-worker approval; required when the Hive contains a Gate.
+    #[serde(default)]
+    pub approval_scope: Option<ApprovalScope>,
+}
+
+/// The Refinery — a Night Shift that proposes reviewable Playbook patches.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefineryBinding {
+    pub schedule: String,
+    /// Directory proposals are written to (never the live spec).
+    pub proposals: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Platform {
@@ -175,6 +346,16 @@ pub enum PatternKind {
     Ledger,
     Sandbox,
     NightShift,
+    Specialist,
+    Delegate,
+    Critic,
+    Pipeline,
+    Port,
+    Hive,
+    Refinery,
+    /// The reproducible harness bundle itself — always satisfied by the
+    /// compiled output, so referencing it never needs a separate binding.
+    Playbook,
 }
 
 impl PatternKind {
@@ -187,6 +368,14 @@ impl PatternKind {
             PatternKind::Ledger => "Ledger",
             PatternKind::Sandbox => "Sandbox",
             PatternKind::NightShift => "NightShift",
+            PatternKind::Specialist => "Specialist",
+            PatternKind::Delegate => "Delegate",
+            PatternKind::Critic => "Critic",
+            PatternKind::Pipeline => "Pipeline",
+            PatternKind::Port => "Port",
+            PatternKind::Hive => "Hive",
+            PatternKind::Refinery => "Refinery",
+            PatternKind::Playbook => "Playbook",
         }
     }
 }
@@ -209,6 +398,14 @@ impl FromStr for PatternKind {
             "Ledger" => Ok(PatternKind::Ledger),
             "Sandbox" => Ok(PatternKind::Sandbox),
             "NightShift" => Ok(PatternKind::NightShift),
+            "Specialist" => Ok(PatternKind::Specialist),
+            "Delegate" => Ok(PatternKind::Delegate),
+            "Critic" => Ok(PatternKind::Critic),
+            "Pipeline" => Ok(PatternKind::Pipeline),
+            "Port" => Ok(PatternKind::Port),
+            "Hive" => Ok(PatternKind::Hive),
+            "Refinery" => Ok(PatternKind::Refinery),
+            "Playbook" => Ok(PatternKind::Playbook),
             other => Err(format!("unknown pattern '{other}'")),
         }
     }

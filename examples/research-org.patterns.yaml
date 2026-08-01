@@ -1,0 +1,55 @@
+# A scale-pattern harness: Research Org.
+#
+#   (Delegate × 3) -> Critic -> Refinery + Ledger + Hive + Port
+#
+# Exercises the patterns bound in v1.2: Delegate (+ Critic variant), Hive (under
+# the Law of the Hive), Port (capability boundary), and Refinery.
+
+harness:
+  name: research-org
+  version: 0.1.0
+
+composition:
+  expression: "(Delegate × 3) -> Critic -> Refinery + Ledger + Hive + Port"
+
+bindings:
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials, raw_model_context]
+
+  ports:
+    - id: web
+      server: web-search
+      observe: [results]
+      # read-only: no write authority, so no write_guard required
+
+  delegates:
+    - id: researcher
+      agent: .claude/agents/researcher.md
+      contract_schema: harness/schemas/researcher.result.schema.json
+      tools: [Read, WebSearch]
+      ports: [web]
+    - id: reviewer
+      agent: .claude/agents/reviewer.md
+      contract_schema: harness/schemas/reviewer.result.schema.json
+      tools: [Read]
+      critic: true
+
+  hives:
+    - id: research
+      orchestrator: .claude/commands/research.md
+      worker: researcher
+      fan_out: dynamic
+      budget: 500000
+      max_depth: 3
+      termination: "no new subtopics discovered"
+      merge: root.report
+      worker_isolation: disjoint
+
+  refinery:
+    schedule: "0 3 * * *"
+    proposals: refinery/proposals
+
+platform:
+  type: claude-code

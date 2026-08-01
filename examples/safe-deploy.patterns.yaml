@@ -1,0 +1,51 @@
+# A safety + scale harness: Safe Deploy Chain.
+#
+#   (Pipeline within Law) -> Gate + Ledger
+#
+# Exercises the Pipeline pattern with typed, chaining stage interfaces.
+
+harness:
+  name: safe-deploy
+  version: 0.1.0
+
+composition:
+  expression: "(Pipeline within Law) -> Gate + Ledger"
+
+bindings:
+  laws:
+    - id: enforce-file-scope
+      kind: guard
+      event: pre_tool
+      applies_to: [edit, write]
+
+  pipelines:
+    - id: release
+      command: .claude/commands/release.md
+      stages:
+        - name: build
+          produces: BuildArtifact
+        - name: test
+          consumes: BuildArtifact
+          produces: TestReport
+        - name: package
+          consumes: TestReport
+          produces: Release
+
+  gate:
+    id: approve-deploy
+    boundary: before_deploy
+    checkpoint_schema: harness/schemas/checkpoint.schema.json
+    bind:
+      - action_hash
+      - repository_revision
+      - working_tree_hash
+      - approver
+      - expiry
+
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials, raw_model_context]
+
+platform:
+  type: claude-code

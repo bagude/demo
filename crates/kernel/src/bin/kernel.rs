@@ -106,6 +106,14 @@ enum Command {
         #[arg(long)]
         playbook_ref: Option<String>,
     },
+    /// Law of the Hive: read a spawn request as JSON on stdin and allow (exit 0)
+    /// or refuse (exit 2) it against the Hive's depth and budget caps.
+    HiveSpawn {
+        #[arg(long)]
+        max_depth: u32,
+        #[arg(long)]
+        budget_remaining: u64,
+    },
     /// Gate operations: request a checkpoint, approve it, or verify it.
     #[command(subcommand)]
     Gate(GateCmd),
@@ -337,6 +345,28 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             EventLog::at(&ledger).append(&event)?;
             println!("discharged obligation '{obligation}'");
             Ok(ExitCode::SUCCESS)
+        }
+        Command::HiveSpawn {
+            max_depth,
+            budget_remaining,
+        } => {
+            let mut stdin = String::new();
+            std::io::stdin().read_to_string(&mut stdin)?;
+            let req: kernel::hive::SpawnRequest = serde_json::from_str(&stdin)
+                .map_err(|e| format!("spawn request is not valid JSON: {e}"))?;
+            match kernel::hive::validate_spawn(&req, max_depth, budget_remaining) {
+                Ok(()) => {
+                    println!(
+                        "spawn authorized: parent={} depth={}",
+                        req.parent, req.depth
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("blocked by Law of the Hive: {e}");
+                    Ok(ExitCode::from(2))
+                }
+            }
         }
         Command::Gate(cmd) => gate(cmd),
         Command::Event {

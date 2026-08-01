@@ -279,10 +279,31 @@ mod tests {
 
     #[test]
     fn parses_replication() {
-        let expr = parse("Delegate").is_err(); // Delegate not bindable here
-        assert!(expr);
-        let expr = parse("Sandbox × 4").unwrap();
+        // Delegate × N appears in real recipes (e.g. Research Org).
+        let expr = parse("Delegate × 4").unwrap();
         assert!(matches!(expr, Expr::Replicate(_, 4)));
+    }
+
+    #[test]
+    fn parses_the_full_v12_pattern_set() {
+        // Every bindable pattern name must tokenize and resolve.
+        let expr = parse(
+            "(Delegate × 3) -> Critic -> Refinery -> Playbook + Hive + Port + Pipeline + Specialist",
+        )
+        .unwrap();
+        let p = expr.patterns();
+        for kind in [
+            PatternKind::Delegate,
+            PatternKind::Critic,
+            PatternKind::Refinery,
+            PatternKind::Playbook,
+            PatternKind::Hive,
+            PatternKind::Port,
+            PatternKind::Pipeline,
+            PatternKind::Specialist,
+        ] {
+            assert!(p.contains(&kind), "missing {kind}");
+        }
     }
 
     #[test]

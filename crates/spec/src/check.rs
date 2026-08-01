@@ -71,6 +71,11 @@ pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnos
     check_gate(spec, &mut d);
     check_laws(spec, binding, &mut d);
     check_ledger(spec, &mut d);
+    check_delegates(spec, &mut d);
+    check_pipelines(spec, &mut d);
+    check_ports(spec, &mut d);
+    check_hives(spec, &mut d);
+    check_specialists(spec, &mut d);
     check_composition(spec, expr, binding, &mut d);
     d
 }
@@ -79,7 +84,8 @@ fn check_cross_reference(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) 
     let b = &spec.bindings;
     let present = expr.patterns();
 
-    // Referenced in the composition but not bound.
+    // Referenced in the composition but not bound. Playbook is always satisfied
+    // (the compiled output *is* the Playbook), so it is not listed here.
     let unbound = [
         (PatternKind::Intake, b.intake.is_some()),
         (PatternKind::Verb, b.verb.is_some()),
@@ -88,6 +94,13 @@ fn check_cross_reference(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) 
         (PatternKind::Ledger, b.ledger.is_some()),
         (PatternKind::Sandbox, b.sandbox.is_some()),
         (PatternKind::NightShift, b.night_shift.is_some()),
+        (PatternKind::Specialist, !b.specialists.is_empty()),
+        (PatternKind::Delegate, !b.delegates.is_empty()),
+        (PatternKind::Critic, b.delegates.iter().any(|dg| dg.critic)),
+        (PatternKind::Pipeline, !b.pipelines.is_empty()),
+        (PatternKind::Port, !b.ports.is_empty()),
+        (PatternKind::Hive, !b.hives.is_empty()),
+        (PatternKind::Refinery, b.refinery.is_some()),
     ];
     for (kind, bound) in unbound {
         if present.contains(&kind) && !bound {
@@ -212,6 +225,181 @@ fn check_ledger(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
     }
 }
 
+fn check_specialists(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
+    for s in &spec.bindings.specialists {
+        if s.skill.trim().is_empty() {
+            d.push(Diagnostic::error(
+                "specialist.missing_skill",
+                format!("specialist '{}' must point at a SKILL.md", s.id),
+            ));
+        }
+        if s.description.trim().is_empty() {
+            d.push(Diagnostic::error(
+                "specialist.missing_description",
+                format!(
+                    "specialist '{}' needs a description so it is demand-loaded at the right time",
+                    s.id
+                ),
+            ));
+        }
+    }
+}
+
+fn check_delegates(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
+    for dg in &spec.bindings.delegates {
+        if dg.contract_schema.trim().is_empty() {
+            d.push(Diagnostic::error(
+                "delegate.unstructured_return",
+                format!(
+                    "delegate '{}' must return through a schema, never unconstrained prose",
+                    dg.id
+                ),
+            ));
+        }
+        if dg.tools.is_empty() {
+            d.push(Diagnostic::error(
+                "delegate.no_authority",
+                format!(
+                    "delegate '{}' must declare its delegated tools (authority); empty is ambiguous",
+                    dg.id
+                ),
+            ));
+        }
+        // Delegated Port authority must be explicit and reference real ports.
+        for port in &dg.ports {
+            if !spec.bindings.ports.iter().any(|p| &p.id == port) {
+                d.push(Diagnostic::error(
+                    "delegate.unknown_port",
+                    format!(
+                        "delegate '{}' is granted port '{port}' which is not declared",
+                        dg.id
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn check_pipelines(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
+    for p in &spec.bindings.pipelines {
+        if p.stages.len() < 2 {
+            d.push(Diagnostic::error(
+                "pipeline.too_few_stages",
+                format!("pipeline '{}' needs at least two typed stages", p.id),
+            ));
+            continue;
+        }
+        // Typed stage interfaces must chain: each stage's output is the next
+        // stage's input. This — not merely a fixed order — is what makes it a
+        // Pipeline rather than a long prompt.
+        for w in p.stages.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            let chained = matches!((&a.produces, &b.consumes), (Some(p), Some(c)) if p == c);
+            if !chained {
+                d.push(Diagnostic::error(
+                    "pipeline.stage_type_mismatch",
+                    format!(
+                        "pipeline '{}': stage '{}' produces {:?} but stage '{}' consumes {:?}; \
+                         typed stage interfaces must chain",
+                        p.id, a.name, a.produces, b.name, b.consumes
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn check_ports(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
+    for p in &spec.bindings.ports {
+        if p.observe.is_empty() && p.write.is_empty() {
+            d.push(Diagnostic::error(
+                "port.no_capability",
+                format!(
+                    "port '{}' must expose at least one observe or write capability",
+                    p.id
+                ),
+            ));
+        }
+        // A Port with write authority is a capability boundary, not an
+        // integration: writes must be governed by a Guard Law.
+        if !p.write.is_empty() {
+            match &p.write_guard {
+                None => d.push(Diagnostic::error(
+                    "port.unguarded_write",
+                    format!(
+                        "port '{}' has write authority but no write_guard; connectivity without a \
+                         capability boundary is ambient privilege",
+                        p.id
+                    ),
+                )),
+                Some(g) if !spec.bindings.laws.iter().any(|l| &l.id == g) => {
+                    d.push(Diagnostic::error(
+                        "port.unknown_write_guard",
+                        format!(
+                            "port '{}' names write_guard '{g}' which is not a declared law",
+                            p.id
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn check_hives(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
+    for h in &spec.bindings.hives {
+        // The Law of the Hive: every spawned task has a budget, a depth, a
+        // termination condition, and a merge destination (worker_isolation and
+        // the worker contract are enforced by the struct's required fields).
+        if h.budget == 0 {
+            d.push(Diagnostic::error(
+                "hive.no_budget",
+                format!(
+                    "hive '{}' must declare a non-zero budget (Law of the Hive)",
+                    h.id
+                ),
+            ));
+        }
+        if h.max_depth == 0 {
+            d.push(Diagnostic::error(
+                "hive.no_depth",
+                format!(
+                    "hive '{}' must declare a non-zero max_depth (Law of the Hive)",
+                    h.id
+                ),
+            ));
+        }
+        if h.termination.trim().is_empty() {
+            d.push(Diagnostic::error(
+                "hive.no_termination",
+                format!(
+                    "hive '{}' must declare a termination condition (Law of the Hive)",
+                    h.id
+                ),
+            ));
+        }
+        if h.merge.trim().is_empty() {
+            d.push(Diagnostic::error(
+                "hive.no_merge",
+                format!(
+                    "hive '{}' must declare a merge destination (Law of the Hive)",
+                    h.id
+                ),
+            ));
+        }
+        if !spec.bindings.delegates.iter().any(|dg| dg.id == h.worker) {
+            d.push(Diagnostic::error(
+                "hive.unknown_worker",
+                format!(
+                    "hive '{}' names worker delegate '{}' which is not declared",
+                    h.id, h.worker
+                ),
+            ));
+        }
+    }
+}
+
 fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mut Vec<Diagnostic>) {
     let b = &spec.bindings;
 
@@ -287,6 +475,60 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
             d.push(Diagnostic::error(
                 "composition.control_without_interceptor",
                 "a Verb is composed 'within' a Law but no laws are bound to intercept it",
+            ));
+        }
+    }
+
+    // Port + retry/resumption/unattended ⇒ replay safety. An unattended run that
+    // retries an external write needs an idempotency key.
+    if expr.contains(PatternKind::Port) && expr.contains(PatternKind::NightShift) {
+        for p in b
+            .ports
+            .iter()
+            .filter(|p| !p.write.is_empty() && !p.idempotent)
+        {
+            d.push(Diagnostic::error(
+                "composition.port_replay_safety",
+                format!(
+                    "port '{}' has write authority and runs unattended (Night Shift) but is not \
+                     idempotent; absence of a local success record is not evidence the external \
+                     action did not occur",
+                    p.id
+                ),
+            ));
+        }
+    }
+
+    // Sandbox + Port ⇒ external isolation. Copy-on-write isolates the filesystem,
+    // not the world; a sandboxed Port write must be isolated, disabled, or a proposal.
+    if expr.contains(PatternKind::Sandbox) && expr.contains(PatternKind::Port) {
+        for p in b
+            .ports
+            .iter()
+            .filter(|p| !p.write.is_empty() && p.sandboxed.is_none())
+        {
+            d.push(Diagnostic::error(
+                "composition.sandbox_port_isolation",
+                format!(
+                    "port '{}' can write externally but does not declare `sandboxed` behavior; a \
+                     filesystem Sandbox does not contain external effects",
+                    p.id
+                ),
+            ));
+        }
+    }
+
+    // Hive + Gate ⇒ approval scope must be declared: global vs. per-worker are
+    // different systems.
+    if expr.contains(PatternKind::Hive) && expr.contains(PatternKind::Gate) {
+        for h in b.hives.iter().filter(|h| h.approval_scope.is_none()) {
+            d.push(Diagnostic::error(
+                "composition.hive_gate_approval_scope",
+                format!(
+                    "hive '{}' contains a Gate but does not declare approval_scope (global vs. \
+                     per-worker)",
+                    h.id
+                ),
             ));
         }
     }
@@ -465,5 +707,156 @@ platform: { type: claude-code }
 "#;
         let c = codes(&check_yaml(yaml));
         assert!(c.contains(&"composition.sandbox_ledger_lineage"));
+    }
+
+    // ---- v1.2 scale patterns ----
+
+    #[test]
+    fn pipeline_with_broken_stage_chain_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Pipeline" }
+bindings:
+  pipelines:
+    - id: p
+      command: c.md
+      stages:
+        - { name: build, produces: Artifact }
+        - { name: test, consumes: WrongType }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"pipeline.stage_type_mismatch"));
+    }
+
+    #[test]
+    fn port_with_unguarded_write_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Port" }
+bindings:
+  ports:
+    - id: gh
+      server: github
+      write: [comments]
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"port.unguarded_write"));
+    }
+
+    #[test]
+    fn hive_missing_budget_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Hive + Delegate" }
+bindings:
+  delegates:
+    - { id: w, agent: a.md, contract_schema: s.json, tools: [Read] }
+  hives:
+    - id: h
+      orchestrator: o.md
+      worker: w
+      fan_out: dynamic
+      budget: 0
+      max_depth: 3
+      termination: done
+      merge: root
+      worker_isolation: disjoint
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"hive.no_budget"));
+    }
+
+    #[test]
+    fn hive_with_unknown_worker_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Hive" }
+bindings:
+  hives:
+    - id: h
+      orchestrator: o.md
+      worker: ghost
+      fan_out: static
+      budget: 100
+      max_depth: 2
+      termination: done
+      merge: root
+      worker_isolation: serialized
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"hive.unknown_worker"));
+    }
+
+    #[test]
+    fn delegate_granted_unknown_port_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Delegate" }
+bindings:
+  delegates:
+    - { id: w, agent: a.md, contract_schema: s.json, tools: [Read], ports: [ghost] }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"delegate.unknown_port"));
+    }
+
+    #[test]
+    fn sandbox_plus_port_without_isolation_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Sandbox + Port" }
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: gh, server: github, write: [comments], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.sandbox_port_isolation"));
+    }
+
+    #[test]
+    fn port_writes_unattended_without_idempotency_is_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "NightShift + Port" }
+bindings:
+  night_shift: { schedule: "0 3 * * *", entrypoint: claude-p }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: gh, server: github, write: [comments], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.port_replay_safety"));
+    }
+
+    #[test]
+    fn hive_with_gate_needs_approval_scope() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "Hive + Gate + Delegate" }
+bindings:
+  delegates:
+    - { id: w, agent: a.md, contract_schema: s.json, tools: [Read] }
+  gate:
+    id: g
+    boundary: before_merge
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+  hives:
+    - id: h
+      orchestrator: o.md
+      worker: w
+      fan_out: dynamic
+      budget: 100
+      max_depth: 2
+      termination: done
+      merge: root
+      worker_isolation: disjoint
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.hive_gate_approval_scope"));
     }
 }

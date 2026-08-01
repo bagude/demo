@@ -99,7 +99,7 @@ guarantee. So the identity chain has four links:
 
 ```
 source_ref   = sha256(spec bytes)
-compiler_ref = sha256(compiler + front-end implementation source + IR schema + target)
+compiler_ref = sha256(compiler + front-end source + Cargo.lock + toolchain + IR schema + target)
 ir_ref       = sha256(canonical serialized resolved IR)
 playbook_ref = sha256(source_ref + compiler_ref + target + ir_ref)
 ```
@@ -107,7 +107,12 @@ playbook_ref = sha256(source_ref + compiler_ref + target + ir_ref)
 `compiler_ref` hashes the compiler's *implementation source*, not its version
 labels: two divergent trees that both still call themselves `0.1.0` — the exact
 state in which a checked-in Playbook once kept claiming a retracted guarantee —
-produce different references, so the divergence is detectable.
+produce different references, so the divergence is detectable. The digest also
+folds in the workspace `Cargo.lock` and the toolchain identity (`rustc
+--version --verbose`: release, commit, host triple, captured at build time), so
+identical source built against different dependency versions or a different
+rustc is a different compiler too. `kernel_ref` binds the same way: source,
+lock, and toolchain — the build gap closed on both sides of the chain.
 
 Every artifact records `source_ref` and `playbook_ref` in its header; the JSON
 manifests additionally expose `compiler_ref` and `ir_ref` (the shell and Markdown

@@ -619,7 +619,8 @@ fn harness_readme(prov: &Prov, refs: &Refs) -> GenFile {
         "Compiled from `{}` by `harnessc {}`.\n\n\
          - source `{}` — the specification bytes\n\
          - compiler `{}` — a content digest of the compiler and front-end\n\
-           implementation source, folded with the IR schema and target\n\
+           implementation source, dependency lock, and toolchain, folded with\n\
+           the IR schema and target\n\
          - IR `{}` — the resolved composition graph\n\
          - **playbook `{}`** — all of the above; the identity of this compiled\n\
            interpretation, and what runtime evidence binds to\n\n\

@@ -470,13 +470,19 @@ fn ports_manifest(prov: &Prov, ports: &[PortBinding]) -> GenFile {
 /// version, spec digest, composition, and every bound pattern.
 fn playbook_manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     let spec = &compiled.spec;
-    let mut patterns: Vec<String> = compiled
-        .composition
-        .patterns()
+    let mut kinds: Vec<_> = compiled.composition.patterns().into_iter().collect();
+    kinds.sort_by_key(|p| p.to_string());
+    // Each pattern with its honest enforcement level (claude-code uses the
+    // shared default map).
+    let patterns: Vec<Value> = kinds
         .iter()
-        .map(|p| p.to_string())
+        .map(|p| {
+            json!({
+                "name": p.to_string(),
+                "enforcement": spec::default_enforcement_level(*p).as_str(),
+            })
+        })
         .collect();
-    patterns.sort();
     prov.json_file(
         "harness/playbook.json",
         json!({
@@ -666,6 +672,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn playbook_manifest_carries_enforcement_levels() {
+        let g = build();
+        let manifest = &find(&g, "harness/playbook.json").content;
+        let v: Value = serde_json::from_str(manifest).unwrap();
+        let patterns = v["patterns"].as_array().unwrap();
+        // Every pattern entry names its enforcement level.
+        assert!(patterns.iter().all(|p| p["enforcement"].is_string()));
+        // The Gate is kernel-mediated in the specimen.
+        assert!(patterns
+            .iter()
+            .any(|p| p["name"] == "Gate" && p["enforcement"] == "kernel-mediated"));
     }
 
     #[test]

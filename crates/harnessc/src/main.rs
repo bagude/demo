@@ -99,7 +99,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let (text, _) = read_spec(&spec)?;
             let backend = resolve_backend(target.as_deref(), &text)?;
             let compiled = spec::compile(&text, backend.as_binding())?;
-            print_model(&compiled, backend.platform());
+            print_model(&compiled, backend.as_binding());
             Ok(ExitCode::SUCCESS)
         }
         Command::Build {
@@ -192,20 +192,25 @@ fn make_executable_if_hook(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn print_model(compiled: &spec::CompiledSpec, target: &str) {
+fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
     let s = &compiled.spec;
     println!("harness: {} v{}", s.harness.name, s.harness.version);
-    println!("target: {target}");
+    println!("target: {}", binding.platform());
     println!("composition: {}", s.composition.expression);
 
-    let mut patterns: Vec<String> = compiled
-        .composition
-        .patterns()
-        .iter()
-        .map(|p| p.to_string())
-        .collect();
-    patterns.sort();
-    println!("patterns: {}", patterns.join(", "));
+    // Patterns with their honest enforcement level (weakest first is fine;
+    // sorted by name for stable output).
+    let mut patterns: Vec<spec::model::PatternKind> =
+        compiled.composition.patterns().into_iter().collect();
+    patterns.sort_by_key(|p| p.to_string());
+    println!("patterns (with enforcement):");
+    for p in &patterns {
+        println!(
+            "  {:<12} {}",
+            p.to_string(),
+            binding.enforcement_level(*p).as_str()
+        );
+    }
 
     for (inner, outer) in compiled.composition.within_relations() {
         let i: Vec<String> = inner.iter().map(|p| p.to_string()).collect();

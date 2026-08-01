@@ -15,7 +15,7 @@ pub mod check;
 pub mod compose;
 pub mod model;
 
-pub use binding::Binding;
+pub use binding::{default_enforcement_level, Binding, EnforcementLevel};
 pub use check::{check, Diagnostic, Severity};
 pub use compose::Expr;
 pub use model::SpecFile;

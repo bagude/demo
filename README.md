@@ -34,6 +34,12 @@ Work enters only as a typed task packet (**Intake**); a command does the work
 Gate)**); every governed decision is appended to an event log (**Ledger**). Its
 declaration is [`harness.patterns.yaml`](harness.patterns.yaml).
 
+All fourteen v1.2 patterns are bindable. Beyond the specimen, two example specs
+exercise the scale patterns — [`examples/research-org.patterns.yaml`](examples/research-org.patterns.yaml)
+(`(Delegate × 3) -> Critic -> Refinery + Ledger + Hive + Port`) and
+[`examples/safe-deploy.patterns.yaml`](examples/safe-deploy.patterns.yaml)
+(`(Pipeline within Law) -> Gate + Ledger`).
+
 ## Workspace
 
 Three crates, mirroring the compiler pipeline:
@@ -42,7 +48,7 @@ Three crates, mirroring the compiler pipeline:
 |-------|------|--------------|
 | [`spec`](crates/spec) | Compiler **front-end** (platform-agnostic) | metamodel, composition-algebra parser, the checker |
 | [`harnessc`](crates/harnessc) | Compiler **back-end** (claude-code binding) | generates the Playbook, stamps provenance |
-| [`harness-kernel`](crates/kernel) | Trusted **runtime kernel** | task packets, Guard Laws, Gate checkpoints, Ledger, obligations |
+| [`harness-kernel`](crates/kernel) | Trusted **runtime kernel** | task packets, Guard Laws, Gate checkpoints, Ledger, obligations, Law of the Hive |
 | [`refinery`](crates/refinery) | The **Refinery** | reads the Ledger, proposes a reviewable patch against the spec |
 
 The front-end knows nothing about any platform; a back-end supplies the
@@ -90,11 +96,22 @@ Each of these is a compile **error**, verified by tests in
 - **`law.event_mismatch`** — a Guard bound post-tool or an Obligation pre-tool.
 - **`composition.referenced_but_unbound`** — a pattern named in the composition
   with no binding supplied.
+- **`pipeline.stage_type_mismatch`** — a Pipeline whose typed stage interfaces
+  don't chain (one stage's output ≠ the next's input). That, not a fixed order,
+  is what makes it a Pipeline.
+- **`port.unguarded_write`** — a Port with write authority but no Guard Law.
+  Connectivity without a capability boundary is ambient privilege.
+- **`delegate.no_authority` / `delegate.unstructured_return` / `delegate.unknown_port`** —
+  a Delegate must declare its delegated tools, return through a schema, and only
+  reference declared Ports (never broader authority than granted).
+- **`hive.*`** — the Law of the Hive: a Hive must declare budget, depth,
+  termination, merge, worker isolation, and a real worker contract.
 - **Composition case law** — obligations that exist only because two patterns
   meet: `Gate + NightShift` ⇒ durable, revalidating suspension;
-  `Sandbox + Ledger` ⇒ recorded lineage; **`Obligation Law + Gate` ⇒ the
-  obligation must be discharged *through* the Gate** (`requires_obligations`),
-  not merely recorded.
+  `Sandbox + Ledger` ⇒ recorded lineage; **`Obligation Law + Gate`** ⇒ the
+  obligation discharged *through* the Gate; `Port + NightShift` ⇒ replay-safe
+  idempotency; `Sandbox + Port` ⇒ declared external isolation; `Hive + Gate` ⇒
+  declared approval scope.
 
 ## What the kernel actually enforces
 
@@ -166,24 +183,25 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 71 tests: metamodel, checker rejections (incl.
-                           # obligation-not-discharged), composition parser,
-                           # kernel enforcement + self-protection, gate
+cargo test --workspace     # 88 tests: metamodel, checker rejections for every
+                           # pattern, composition parser + case law, kernel
+                           # enforcement + self-protection + Law of the Hive, gate
                            # revalidation + obligations, playbook_ref run binding,
-                           # both backends, and the Refinery ratchet + guardrail
+                           # both backends, example specs, and the Refinery ratchet
 ```
 
 ## Status and next steps
 
-This is the bootstrap carried through **Stage 3** and aligned to constitution
-**v1.2**: the obligation discharges through the Gate, a second platform binding
-rides the same front-end, the Refinery closes the loop under the ratchet, the
-Guard protects its own enforcement artifacts, and every Ledger event is bound to
-the spec version that governed it.
+Aligned to constitution **v1.2**, with **all fourteen patterns bindable**: the
+scale patterns (Specialist, Delegate/Critic, Pipeline, Port, Hive) now have typed
+bindings, completeness checks, Claude Code generation, and their v1.2 composition
+case-law. The Law of the Hive is kernel-enforced (`kernel hive-spawn` validates
+each spawn's parent/contract/budget/depth/termination/merge/scope), and the Port
+replay-safety, Sandbox+Port isolation, and Hive+Gate approval-scope pairings are
+checker rules.
 
-Not yet modelled from v1.2 (patterns this bootstrap doesn't bind): Port replay
-safety (`attempt_id` is in the envelope but unused), Sandbox + Port external
-isolation, and Hive read/write-scope discipline. Natural continuations: a
-Python/OpenAI-Agents back-end behind the same `Binding`; the Port/Sandbox/Hive
-patterns with their v1.2 pairings; and version-promotion tooling that applies an
-approved Refinery proposal and recompiles.
+Natural continuations: a Python/OpenAI-Agents back-end behind the same `Binding`;
+richer Claude Code artifacts for the scale patterns (fuller agent/skill/MCP
+scaffolds); wiring `attempt_id` into a real Port replay path; and
+version-promotion tooling that applies an approved Refinery proposal and
+recompiles.

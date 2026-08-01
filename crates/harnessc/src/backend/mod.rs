@@ -35,3 +35,55 @@ pub fn select(target: &str) -> Option<Box<dyn Backend>> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RESEARCH_ORG: &str = include_str!("../../../../examples/research-org.patterns.yaml");
+    const SAFE_DEPLOY: &str = include_str!("../../../../examples/safe-deploy.patterns.yaml");
+
+    fn compile_and_generate(yaml: &str) -> Vec<String> {
+        let backend = select("claude-code").unwrap();
+        let compiled = spec::compile(yaml, backend.as_binding())
+            .unwrap_or_else(|e| panic!("example must compile: {e}"));
+        backend
+            .generate(&compiled, "sha256:test")
+            .files
+            .into_iter()
+            .map(|f| f.path)
+            .collect()
+    }
+
+    #[test]
+    fn research_org_compiles_and_generates_delegate_hive_port_artifacts() {
+        let paths = compile_and_generate(RESEARCH_ORG);
+        for expected in [
+            ".claude/agents/researcher.md",
+            ".claude/agents/reviewer.md",
+            ".claude/commands/research.md",
+            "harness/schemas/researcher.result.schema.json",
+            ".mcp.json",
+            "harness/ports.json",
+            "harness/playbook.json",
+        ] {
+            assert!(paths.iter().any(|p| p == expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn safe_deploy_compiles_and_generates_the_pipeline_command() {
+        let paths = compile_and_generate(SAFE_DEPLOY);
+        assert!(paths.iter().any(|p| p == ".claude/commands/release.md"));
+    }
+
+    #[test]
+    fn both_examples_also_compile_portable() {
+        let backend = select("portable").unwrap();
+        for yaml in [RESEARCH_ORG, SAFE_DEPLOY] {
+            let compiled = spec::compile(yaml, backend.as_binding()).expect("compiles portable");
+            let files = backend.generate(&compiled, "sha256:test").files;
+            assert!(files.iter().any(|f| f.path == "harness.manifest.json"));
+        }
+    }
+}

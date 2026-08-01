@@ -5,7 +5,10 @@
 //! `harness/` hooks that shell out to the trusted `kernel`.
 
 use serde_json::{json, Value};
-use spec::model::{GateBinding, LawBinding, LawEvent, SpecFile};
+use spec::model::{
+    DelegateBinding, GateBinding, HiveBinding, LawBinding, LawEvent, PipelineBinding, PortBinding,
+    SpecFile, SpecialistBinding,
+};
 use spec::{Binding, CompiledSpec};
 
 use crate::backend::Backend;
@@ -68,6 +71,8 @@ impl Backend for ClaudeCode {
         if let Some(gate) = &spec.bindings.gate {
             files.push(gate_file(&prov, gate));
         }
+        files.extend(pattern_files(&prov, spec));
+        files.push(playbook_manifest(&prov, compiled));
         for dir in runtime_dirs(spec) {
             files.push(prov.gitkeep(&dir));
         }
@@ -302,6 +307,186 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         ),
     });
     out
+}
+
+/// Generate the Claude Code artifacts for the scale/interaction patterns.
+fn pattern_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
+    let b = &spec.bindings;
+    let mut out = Vec::new();
+
+    for s in &b.specialists {
+        out.push(specialist_skill(prov, s));
+    }
+    for dg in &b.delegates {
+        out.push(delegate_agent(prov, dg));
+        out.push(prov.json_file(&dg.contract_schema, delegate_contract_schema(dg)));
+    }
+    for p in &b.pipelines {
+        out.push(pipeline_command(prov, p));
+    }
+    for h in &b.hives {
+        out.push(hive_orchestrator(prov, h));
+    }
+    if !b.ports.is_empty() {
+        out.push(mcp_config(prov, &b.ports));
+        out.push(ports_manifest(prov, &b.ports));
+    }
+    out
+}
+
+fn specialist_skill(prov: &Prov, s: &SpecialistBinding) -> GenFile {
+    let mut body = prov.md_header();
+    body.push('\n');
+    body.push_str(&format!(
+        "---\nname: {}\ndescription: {}\n---\n\n# {}\n\nDemand-loaded knowledge (a Specialist). This SKILL.md is present only when the \
+         task calls for it. Fill in the domain expertise below.\n",
+        s.id, s.description, s.id
+    ));
+    GenFile {
+        path: s.skill.clone(),
+        content: body,
+    }
+}
+
+fn delegate_agent(prov: &Prov, dg: &DelegateBinding) -> GenFile {
+    let mut body = prov.md_header();
+    body.push('\n');
+    let role = if dg.critic {
+        "Critic (judges work it did not produce)"
+    } else {
+        "Delegate"
+    };
+    body.push_str(&format!(
+        "# {} — {}\n\nA Nested Executor with a fresh context and a narrow mandate.\n\n\
+         - **Delegated authority (tools):** {}\n- **Ports:** {}\n- **Return contract:** `{}` — \
+         results MUST conform to this schema; narrative belongs *inside* typed fields, never as an \
+         unstructured return.\n",
+        dg.id,
+        role,
+        dg.tools.join(", "),
+        if dg.ports.is_empty() {
+            "none".to_string()
+        } else {
+            dg.ports.join(", ")
+        },
+        dg.contract_schema,
+    ));
+    GenFile {
+        path: dg.agent.clone(),
+        content: body,
+    }
+}
+
+fn delegate_contract_schema(dg: &DelegateBinding) -> Value {
+    json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": format!("{}Result", dg.id),
+        "type": "object",
+        "description": "The typed contract a delegate returns against — never unstructured prose.",
+        "required": ["result"],
+        "properties": {
+            "result": { "type": "object" },
+            "sources": { "type": "array", "items": { "type": "string" } },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+    })
+}
+
+fn pipeline_command(prov: &Prov, p: &PipelineBinding) -> GenFile {
+    let mut body = prov.md_header();
+    body.push('\n');
+    body.push_str(&format!(
+        "# /{}\n\nA Pipeline: control flow fixed at write-time; each stage \
+        consumes and produces typed artifacts. The model exercises judgment *within* a stage but \
+        cannot redefine the stage graph.\n\n## Stages\n\n",
+        p.id
+    ));
+    for (i, st) in p.stages.iter().enumerate() {
+        body.push_str(&format!(
+            "{}. **{}** — consumes `{}`, produces `{}`\n",
+            i + 1,
+            st.name,
+            st.consumes.as_deref().unwrap_or("—"),
+            st.produces.as_deref().unwrap_or("—"),
+        ));
+    }
+    GenFile {
+        path: p.command.clone(),
+        content: body,
+    }
+}
+
+fn hive_orchestrator(prov: &Prov, h: &HiveBinding) -> GenFile {
+    let mut body = prov.md_header();
+    body.push('\n');
+    body.push_str(&format!(
+        "# /{} — Hive orchestrator\n\nCoordinates fan-out and merge. **{:?}** fan-out; workers are \
+         `{}` delegates; results merge to `{}`.\n\n## Law of the Hive (enforced by the kernel)\n\n\
+         Every spawned task must have a parent, a contract, a budget, a depth, a termination \
+         condition, a merge destination, and a declared write scope. Before spawning, validate:\n\n\
+         ```sh\n\
+         echo \"$SPAWN_JSON\" | kernel hive-spawn --max-depth {} --budget-remaining $REMAINING\n\
+         ```\n\n\
+         Caps: budget {} · max depth {} · worker isolation {:?}.\n",
+        h.id, h.fan_out, h.worker, h.merge, h.max_depth, h.budget, h.max_depth, h.worker_isolation,
+    ));
+    if let Some(scope) = h.approval_scope {
+        body.push_str(&format!("\nGate approval scope: **{scope:?}**.\n"));
+    }
+    GenFile {
+        path: h.orchestrator.clone(),
+        content: body,
+    }
+}
+
+fn mcp_config(prov: &Prov, ports: &[PortBinding]) -> GenFile {
+    let mut servers = serde_json::Map::new();
+    for p in ports {
+        servers.insert(p.server.clone(), json!({ "command": p.server }));
+    }
+    prov.json_file(".mcp.json", json!({ "mcpServers": Value::Object(servers) }))
+}
+
+fn ports_manifest(prov: &Prov, ports: &[PortBinding]) -> GenFile {
+    let entries: Vec<Value> = ports
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "server": p.server,
+                "observe": p.observe,
+                "write": p.write,
+                "write_guard": p.write_guard,
+                "credentials": p.credentials,
+                "idempotent": p.idempotent,
+                "sandboxed": p.sandboxed.map(|s| format!("{s:?}").to_lowercase()),
+            })
+        })
+        .collect();
+    prov.json_file("harness/ports.json", json!({ "ports": entries }))
+}
+
+/// The Playbook manifest — the reproducible harness bundle's identity: name,
+/// version, spec digest, composition, and every bound pattern.
+fn playbook_manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
+    let spec = &compiled.spec;
+    let mut patterns: Vec<String> = compiled
+        .composition
+        .patterns()
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    patterns.sort();
+    prov.json_file(
+        "harness/playbook.json",
+        json!({
+            "name": spec.harness.name,
+            "version": spec.harness.version,
+            "playbook_ref": prov.spec_hash,
+            "composition": spec.composition.expression,
+            "patterns": patterns,
+        }),
+    )
 }
 
 fn protected_file(prov: &Prov) -> GenFile {

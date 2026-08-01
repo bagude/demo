@@ -1,0 +1,19 @@
+{
+  "_generated": {
+    "from": "harness.patterns.yaml",
+    "generator": "harnessc 0.1.0",
+    "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
+    "spec_hash": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
+  },
+  "composition": "Intake -> Verb within (Law + Gate) + Ledger",
+  "name": "enablement-workbench",
+  "patterns": [
+    "Gate",
+    "Intake",
+    "Law",
+    "Ledger",
+    "Verb"
+  ],
+  "playbook_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2",
+  "version": "0.1.0"
+}

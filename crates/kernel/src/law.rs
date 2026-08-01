@@ -85,8 +85,57 @@ pub fn enforce(packet: &TaskPacket, path: &str, protected: &[String]) -> Enforce
             "'{path}' is absolute or escapes the workspace root; such paths are never authorized"
         ));
     }
-    let in_scope = packet.authorizes_write(path);
-    if is_protected(protected, path) {
+    verdict(
+        packet,
+        path,
+        packet.authorizes_write(path),
+        is_protected(protected, path),
+    )
+}
+
+/// [`enforce`], evaluated against the **canonical** target on the real
+/// filesystem rooted at `root`.
+///
+/// Lexical checks hold on spelling; this holds on reality. Symlinks in the
+/// existing portion of the path are resolved fully, so `src/link.rs` that IS
+/// `harness/hooks/x.sh` is judged as the hook it is. Semantics, stated:
+///
+/// - **Authorization binds to the real target.** A write through a symlink is
+///   in scope only if the *resolved* path is — to edit through a link,
+///   scope the real target.
+/// - **Protection covers both names.** The canonical target *and* the lexical
+///   name written through are checked against the protected set.
+/// - A path resolving outside the workspace, or through a dangling symlink,
+///   is denied outright.
+pub fn enforce_at(
+    root: &std::path::Path,
+    packet: &TaskPacket,
+    path: &str,
+    protected: &[String],
+) -> Enforcement {
+    let canonical = match crate::fsutil::canonical_workspace_rel(root, path) {
+        Ok(c) => c,
+        Err(reason) => return Enforcement::Deny(reason),
+    };
+    let lexical: String = crate::packet::normalize_components(path)
+        .unwrap_or_default()
+        .join("/");
+    let display = if canonical == lexical {
+        canonical.clone()
+    } else {
+        format!("{lexical}' -> '{canonical}")
+    };
+    verdict(
+        packet,
+        &display,
+        packet.authorizes_write(&canonical),
+        is_protected(protected, &canonical) || is_protected(protected, &lexical),
+    )
+}
+
+/// The shared Guard branching over an already-resolved judgment.
+fn verdict(packet: &TaskPacket, path: &str, in_scope: bool, hit_protected: bool) -> Enforcement {
+    if hit_protected {
         if in_scope && packet.amends_enforcement {
             Enforcement::AllowAmendment
         } else if in_scope {
@@ -210,6 +259,107 @@ mod tests {
             &protected(),
         );
         assert!(matches!(d, Enforcement::Deny(reason) if reason.contains("escapes the workspace")));
+    }
+
+    #[cfg(unix)]
+    mod canonical {
+        use super::*;
+        use std::os::unix::fs::symlink;
+
+        fn scoped(scope: &str) -> TaskPacket {
+            let mut p = packet();
+            p.files = vec![FileScope::write(scope)];
+            p
+        }
+
+        /// A workspace with a real hook and a src/ dir to plant links in.
+        fn workspace() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("harness/hooks")).unwrap();
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+            std::fs::write(dir.path().join("harness/hooks/guard.sh"), "#!/bin/sh\n").unwrap();
+            std::fs::write(dir.path().join("docs/notes.md"), "notes").unwrap();
+            dir
+        }
+
+        #[test]
+        fn a_symlink_cannot_launder_a_protected_artifact_into_scope() {
+            // THE bypass this exists to close: the packet scopes src/, and
+            // src/guard.sh IS harness/hooks/guard.sh. Lexically in scope;
+            // really a hook.
+            let ws = workspace();
+            symlink(
+                ws.path().join("harness/hooks/guard.sh"),
+                ws.path().join("src/guard.sh"),
+            )
+            .unwrap();
+            let d = enforce_at(ws.path(), &scoped("src/"), "src/guard.sh", &protected());
+            assert!(
+                matches!(&d, Enforcement::Deny(r) if r.contains("enforcement artifact")),
+                "{d:?}"
+            );
+        }
+
+        #[test]
+        fn a_symlink_escaping_the_workspace_is_denied() {
+            let ws = workspace();
+            let outside = tempfile::tempdir().unwrap();
+            symlink(outside.path(), ws.path().join("src/out")).unwrap();
+            let d = enforce_at(ws.path(), &scoped("src/"), "src/out/x.rs", &protected());
+            assert!(
+                matches!(&d, Enforcement::Deny(r) if r.contains("outside the workspace")),
+                "{d:?}"
+            );
+        }
+
+        #[test]
+        fn authorization_binds_to_the_real_target() {
+            let ws = workspace();
+            symlink(ws.path().join("docs"), ws.path().join("src/d")).unwrap();
+            // Scoped src/ only: the write really lands in docs/, so deny.
+            let d = enforce_at(ws.path(), &scoped("src/"), "src/d/notes.md", &protected());
+            assert!(
+                matches!(&d, Enforcement::Deny(r) if r.contains("write scope")),
+                "{d:?}"
+            );
+            // Scoped docs/ (the real target): the same write is allowed.
+            let d = enforce_at(ws.path(), &scoped("docs/"), "src/d/notes.md", &protected());
+            assert_eq!(d, Enforcement::Allow);
+        }
+
+        #[test]
+        fn a_dangling_symlink_is_refused() {
+            let ws = workspace();
+            symlink(ws.path().join("nowhere"), ws.path().join("src/ghost")).unwrap();
+            let d = enforce_at(ws.path(), &scoped("src/"), "src/ghost", &protected());
+            assert!(
+                matches!(&d, Enforcement::Deny(r) if r.contains("dangling")),
+                "{d:?}"
+            );
+        }
+
+        #[test]
+        fn ordinary_paths_behave_exactly_as_before() {
+            let ws = workspace();
+            // Existing and not-yet-existing files, no links involved.
+            assert_eq!(
+                enforce_at(ws.path(), &scoped("docs/"), "docs/notes.md", &protected()),
+                Enforcement::Allow
+            );
+            assert_eq!(
+                enforce_at(ws.path(), &scoped("src/"), "src/new_file.rs", &protected()),
+                Enforcement::Allow
+            );
+            assert!(matches!(
+                enforce_at(ws.path(), &scoped("src/"), "docs/notes.md", &protected()),
+                Enforcement::Deny(_)
+            ));
+            assert!(matches!(
+                enforce_at(ws.path(), &scoped("src/"), "/etc/passwd", &protected()),
+                Enforcement::Deny(_)
+            ));
+        }
     }
 
     #[test]

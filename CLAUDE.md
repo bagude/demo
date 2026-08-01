@@ -1,7 +1,7 @@
 <!--
   GENERATED FROM: harness.patterns.yaml
   SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
-  PLAYBOOK: sha256:f394538e7ede906cdfd440ae75bf0f6eaf62bdc06b75c1c30f905ef6472ba380
+  PLAYBOOK: sha256:aae0d2bb43d17d95c01de7c037ede4a904addaafc9133131aace9cb7a4c64c7e
   GENERATOR: harnessc 0.1.0
   DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 -->
@@ -21,7 +21,7 @@ Work enters this system **only** as a typed task packet admitted through the Int
 ## Laws in force
 
 - `enforce-file-scope` (Guard at PreTool, applies to edit, write, delete): **enforced** — the kernel blocks edits outside the packet's write scope; enforcement artifacts additionally require an explicit `amends_enforcement` grant
-- `require-validation` (Obligation at PostTool, applies to edit, write): **enforced via the Gate** — recorded after each edit and required clear before commit
+- `require-validation` (Obligation at PostTool, applies to edit, write; scope run): **enforced via the Gate** — recorded after each edit and required clear before commit
 
 ## Gate
 

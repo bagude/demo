@@ -58,6 +58,77 @@ fn unique_tmp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Resolve a workspace-relative path to its **canonical** workspace-relative
+/// form: the existing portion is walked component by component with symlinks
+/// followed fully, and the non-existing tail (already lexically normalized —
+/// no `..`, no absolute) is appended as-is. Returns `Err` with the denial
+/// reason when the path resolves outside the workspace root (a symlink
+/// escape) or writes through a dangling symlink (the write would land at an
+/// unvetted target).
+///
+/// This is what makes scope authority hold on the *real* filesystem rather
+/// than on spelling: lexical checks alone cannot see that `src/link.rs` IS
+/// `harness/hooks/x.sh`. Case aliasing is normalized where the platform's
+/// `canonicalize` reports on-disk casing (best-effort by construction; on
+/// case-sensitive filesystems there is nothing to normalize).
+pub fn canonical_workspace_rel(root: &Path, path: &str) -> Result<String, String> {
+    let Some(components) = crate::packet::normalize_components(path) else {
+        return Err(format!(
+            "'{path}' is absolute or escapes the workspace root; such paths are never authorized"
+        ));
+    };
+    let root_canon = fs::canonicalize(root)
+        .map_err(|e| format!("workspace root cannot be canonicalized: {e}"))?;
+
+    // Walk the deepest existing prefix, following symlinks as they appear so
+    // every later component is resolved relative to the REAL directory.
+    let mut existing = root_canon.clone();
+    let mut resolved_upto = 0;
+    for (i, comp) in components.iter().enumerate() {
+        let next = existing.join(comp);
+        match fs::symlink_metadata(&next) {
+            Ok(md) if md.file_type().is_symlink() => {
+                existing = fs::canonicalize(&next).map_err(|_| {
+                    format!(
+                        "'{}' is a dangling symlink; refusing to write through it",
+                        components[..=i].join("/")
+                    )
+                })?;
+                resolved_upto = i + 1;
+            }
+            Ok(_) => {
+                existing = next;
+                resolved_upto = i + 1;
+            }
+            Err(_) => break,
+        }
+    }
+    // One more canonicalize of the existing prefix: fixes on-disk casing on
+    // platforms that report it (no-op elsewhere; the prefix exists).
+    if resolved_upto > 0 {
+        if let Ok(c) = fs::canonicalize(&existing) {
+            existing = c;
+        }
+    }
+
+    let mut target = existing;
+    for comp in &components[resolved_upto..] {
+        target = target.join(comp);
+    }
+    let rel = target.strip_prefix(&root_canon).map_err(|_| {
+        format!(
+            "'{path}' resolves outside the workspace ({}); a symlink must not launder an \
+             out-of-scope target into an authorized name",
+            target.display()
+        )
+    })?;
+    Ok(rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

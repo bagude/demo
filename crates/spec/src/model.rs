@@ -99,6 +99,34 @@ pub enum LawEvent {
     PostTool,
 }
 
+/// The scope an Obligation opens and discharges under — the answer to "owed
+/// by WHOM, until WHEN". `run` (the default) is the narrowest: an edit in run
+/// A opens debt only run A's validation can clear. `task` follows the task
+/// packet across runs; `branch` follows the git branch; `workspace` is global;
+/// `action` is per edited path — every touched file owes its own validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ObligationScope {
+    #[default]
+    Run,
+    Task,
+    Branch,
+    Workspace,
+    Action,
+}
+
+impl ObligationScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ObligationScope::Run => "run",
+            ObligationScope::Task => "task",
+            ObligationScope::Branch => "branch",
+            ObligationScope::Workspace => "workspace",
+            ObligationScope::Action => "action",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LawBinding {
@@ -106,6 +134,12 @@ pub struct LawBinding {
     pub kind: LawKind,
     pub event: LawEvent,
     pub applies_to: Vec<String>,
+    /// The scope this Obligation opens and discharges under. Declared, not
+    /// assumed: `run` unless the spec says otherwise. Meaningless on a Guard
+    /// (a Guard decides instantaneously and owes nothing) — the checker
+    /// rejects a non-run scope there.
+    #[serde(default)]
+    pub scope: ObligationScope,
     #[serde(default)]
     pub implementation: Option<String>,
     /// Install this Law even when no composition occurrence (or binding

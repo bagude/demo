@@ -128,17 +128,10 @@ fn active_laws(compiled: &CompiledSpec) -> Vec<&LawBinding> {
         .collect()
 }
 
-/// The obligations the commit Gate enforces — only when the Gate itself is an
-/// active component of the resolved architecture.
+/// The obligations the commit Gate enforces (`id:scope` encoded) — only when
+/// the Gate itself is an active component of the resolved architecture.
 fn gate_obligations(compiled: &CompiledSpec) -> Vec<String> {
-    compiled
-        .spec
-        .bindings
-        .gate
-        .as_ref()
-        .filter(|g| compiled.graph.is_active(spec::PatternKind::Gate, &g.id))
-        .map(|g| g.requires_obligations.clone())
-        .unwrap_or_default()
+    common::encoded_gate_requirements(compiled)
 }
 
 fn claude_md(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
@@ -181,11 +174,15 @@ fn claude_md(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
                 _ => "declared",
             };
             body.push_str(&format!(
-                "- `{}` ({:?} at {:?}, applies to {}): {}\n",
+                "- `{}` ({:?} at {:?}, applies to {}{}): {}\n",
                 law.id,
                 law.kind,
                 law.event,
                 law.applies_to.join(", "),
+                match law.kind {
+                    spec::model::LawKind::Obligation => format!("; scope {}", law.scope.as_str()),
+                    _ => String::new(),
+                },
                 enforcement
             ));
         }
@@ -324,9 +321,15 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
                 protected = PROTECTED_FILE,
             ),
             "require-validation" => format!(
-                "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\"\n",
+                "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit\n# (debt scoped '{scope}', as the spec declares).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --scope {scope}{packet_arg}\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
+                scope = law.scope.as_str(),
+                packet_arg = if law.scope == spec::model::ObligationScope::Task {
+                    format!(" \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\"")
+                } else {
+                    String::new()
+                },
             ),
             other => format!(
                 "#!/usr/bin/env bash\n{header}# Law '{other}' has no kernel binding.\necho 'law {other} is not implemented by the kernel' >&2\nexit 1\n",
@@ -349,7 +352,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         out.push(GenFile {
             path: APPROVE_COMMIT_HOOK.to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding (per run).\n# Every commit evaluation is recorded to the Ledger, run-bound like any other decision.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" --playbook-ref \"{playbook}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding, each\n# at its declared scope. Every commit evaluation is recorded to the Ledger.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" --playbook-ref \"{playbook}\" --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\"{requires}\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
             ),
@@ -410,7 +413,11 @@ fn pattern_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         .iter()
         .filter(|h| g.is_active(PatternKind::Hive, &h.id))
     {
-        out.push(hive_orchestrator(prov, h));
+        out.push(hive_orchestrator(
+            prov,
+            h,
+            &ledger_destination(&compiled.spec),
+        ));
     }
     let active_ports: Vec<_> = b
         .ports
@@ -507,21 +514,29 @@ fn pipeline_command(prov: &Prov, p: &PipelineBinding) -> GenFile {
     }
 }
 
-fn hive_orchestrator(prov: &Prov, h: &HiveBinding) -> GenFile {
+fn hive_orchestrator(prov: &Prov, h: &HiveBinding, ledger: &str) -> GenFile {
     let mut body = prov.md_header();
     body.push('\n');
     body.push_str(&format!(
-        "# /{} — Hive orchestrator\n\nCoordinates fan-out and merge. **{:?}** fan-out; workers are \
+        "# /{id} — Hive orchestrator\n\nCoordinates fan-out and merge. **{:?}** fan-out; workers are \
          `{}` delegates; results merge to `{}`.\n\n## Law of the Hive (kernel-validated when invoked)\n\n\
          Every spawned task must have a parent, a contract, a budget, a depth, a termination \
          condition, a merge destination, and a declared write scope. Nothing forces this \
          invocation — the enforcement level is statically-checked, not mediated — so the required \
-         pre-spawn validation is:\n\n\
+         flow is **transactional against the durable budget pool** (racing spawns serialize on \
+         the pool's lock and can never jointly overshoot the total):\n\n\
          ```sh\n\
-         echo \"$SPAWN_JSON\" | kernel hive-spawn --max-depth {} --budget-remaining $REMAINING\n\
+         # once, before fan-out: create the pool\n\
+         kernel hive init --store hive --hive {id} --budget {budget}\n\n\
+         # per spawn: validate AND atomically reserve the spawn's budget\n\
+         echo \"$SPAWN_JSON\" | kernel hive-spawn --max-depth {max_depth} \\\n  --store hive --hive {id} --spawn-id \"$SPAWN_ID\" --ledger {ledger}\n\n\
+         # per worker completion: record actual spend, return the remainder\n\
+         kernel hive settle --store hive --hive {id} --spawn-id \"$SPAWN_ID\" \\\n  --spent \"$TOKENS_SPENT\" --ledger {ledger}\n\
          ```\n\n\
-         Caps: budget {} · max depth {} · worker isolation {:?}.\n",
-        h.id, h.fan_out, h.worker, h.merge, h.max_depth, h.budget, h.max_depth, h.worker_isolation,
+         A failed worker settles with `--spent 0` so its whole reservation returns to the pool.\n\n\
+         Caps: budget {budget} · max depth {max_depth} · worker isolation {:?}.\n",
+        h.fan_out, h.worker, h.merge, h.worker_isolation,
+        id = h.id, budget = h.budget, max_depth = h.max_depth,
     ));
     if let Some(scope) = h.approval_scope {
         body.push_str(&format!("\nGate approval scope: **{scope:?}**.\n"));
@@ -860,6 +875,40 @@ platform: { type: claude-code }
         // The commit Gate's decisions are Ledger events like any other, so the
         // hook must bake in the run binding the way the Guard hooks do.
         assert!(hook.contains("--playbook-ref"));
+    }
+
+    #[test]
+    fn declared_obligation_scope_flows_into_the_generated_hooks() {
+        // The spec declares the scope; the compiled hooks carry it to the
+        // kernel — recording side (--scope) and gate side (--require
+        // id:scope) must agree, or debt opened at one scope would be
+        // evaluated at another.
+        let yaml = SPECIMEN.replace(
+            "    - id: require-validation\n      kind: obligation\n",
+            "    - id: require-validation\n      kind: obligation\n      scope: workspace\n",
+        );
+        let compiled = spec::compile(&yaml, &ClaudeCode).expect("compiles");
+        let g = ClaudeCode.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        );
+        let record = &find(&g, "harness/hooks/require_validation.sh").content;
+        assert!(record.contains("--scope workspace"), "{record}");
+        let gate = &find(&g, APPROVE_COMMIT_HOOK).content;
+        assert!(
+            gate.contains("--require require-validation:workspace"),
+            "{gate}"
+        );
+
+        // The default is explicit too: the specimen (no scope declared)
+        // compiles to `run`, spelled out rather than assumed at runtime.
+        let g = build();
+        assert!(find(&g, "harness/hooks/require_validation.sh")
+            .content
+            .contains("--scope run"));
+        assert!(find(&g, APPROVE_COMMIT_HOOK)
+            .content
+            .contains("--require require-validation:run"));
     }
 
     #[test]

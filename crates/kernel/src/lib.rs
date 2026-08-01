@@ -114,7 +114,10 @@ pub use event::{
     line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, CHAIN_GENESIS,
 };
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
-pub use hive::{first_write_conflict, validate_spawn, HiveViolation, SpawnRequest};
+pub use hive::{
+    first_write_conflict, validate_spawn, BudgetError, BudgetPool, HiveViolation, PoolState,
+    SpawnRequest,
+};
 pub use identity::{resolve_authority, IdentityError, Registry};
 pub use intake::{admit, AdmitError};
 pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};

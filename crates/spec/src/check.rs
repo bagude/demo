@@ -520,6 +520,20 @@ fn check_laws(spec: &SpecFile, binding: &dyn Binding, d: &mut Vec<Diagnostic>) {
                 format!("law '{}' must list at least one tool it applies to", law.id),
             ));
         }
+        // Scope is an Obligation concept: a Guard decides instantaneously and
+        // owes nothing afterwards, so a declared scope on one is a category
+        // error the author should hear about, not a silently ignored field.
+        if matches!(law.kind, LawKind::Guard) && law.scope != crate::model::ObligationScope::Run {
+            d.push(Diagnostic::error(
+                "law.scope_on_guard",
+                format!(
+                    "law '{}' is a Guard but declares scope '{}'; scope governs when an \
+                     Obligation's debt is discharged, and a Guard opens no debt",
+                    law.id,
+                    law.scope.as_str()
+                ),
+            ));
+        }
         if !binding.supports_law(&law.id) {
             d.push(Diagnostic::error(
                 "law.unsupported",
@@ -988,6 +1002,35 @@ platform:
         // but never discharged.
         let yaml = SPECIMEN.replace("    requires_obligations: [require-validation]\n", "");
         assert!(codes(&check_yaml(&yaml)).contains(&"composition.obligation_not_discharged"));
+    }
+
+    #[test]
+    fn a_guard_declaring_a_scope_is_rejected() {
+        // Scope governs when an Obligation's debt is discharged; a Guard
+        // decides instantaneously and owes nothing — declaring a scope on one
+        // is a category error, not a silently ignored field.
+        let yaml = SPECIMEN.replace(
+            "    - id: enforce-file-scope\n      kind: guard\n",
+            "    - id: enforce-file-scope\n      kind: guard\n      scope: workspace\n",
+        );
+        assert!(codes(&check_yaml(&yaml)).contains(&"law.scope_on_guard"));
+    }
+
+    #[test]
+    fn an_obligation_may_declare_any_scope() {
+        for scope in ["run", "task", "branch", "workspace", "action"] {
+            let yaml = SPECIMEN.replace(
+                "    - id: require-validation\n      kind: obligation\n",
+                &format!(
+                    "    - id: require-validation\n      kind: obligation\n      scope: {scope}\n"
+                ),
+            );
+            let diags = check_yaml(&yaml);
+            assert!(
+                !codes(&diags).contains(&"law.scope_on_guard"),
+                "scope '{scope}' is legal on an obligation: {diags:?}"
+            );
+        }
     }
 
     #[test]

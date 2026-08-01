@@ -65,16 +65,10 @@ impl Backend for Portable {
     }
 }
 
-/// The commit Gate's obligations — only when the Gate is an active component.
+/// The commit Gate's obligations (`id:scope` encoded) — only when the Gate is
+/// an active component.
 fn gate_obligations(compiled: &CompiledSpec) -> Vec<String> {
-    compiled
-        .spec
-        .bindings
-        .gate
-        .as_ref()
-        .filter(|g| compiled.graph.is_active(spec::PatternKind::Gate, &g.id))
-        .map(|g| g.requires_obligations.clone())
-        .unwrap_or_default()
+    crate::common::encoded_gate_requirements(compiled)
 }
 
 fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
@@ -97,7 +91,10 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
                 ),
                 "require-validation" => (
                     "hooks/require_validation.sh",
-                    format!("kernel post-tool --ledger {ledger}"),
+                    format!(
+                        "kernel post-tool --ledger {ledger} --scope {}",
+                        law.scope.as_str()
+                    ),
                 ),
                 _ => ("", String::new()),
             };
@@ -106,6 +103,7 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
                 "kind": format!("{:?}", law.kind).to_lowercase(),
                 "event": format!("{:?}", law.event),
                 "applies_to": law.applies_to,
+                "scope": law.scope.as_str(),
                 "hook": hook,
                 "invokes": invocation,
             })
@@ -128,7 +126,10 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
                 "hook": "hooks/approve_commit.sh",
                 "invokes": format!(
                     "kernel pre-commit --ledger {ledger}{}",
-                    g.requires_obligations.iter().map(|o| format!(" --require {o}")).collect::<String>()
+                    gate_obligations(compiled)
+                        .iter()
+                        .map(|o| format!(" --require {o}"))
+                        .collect::<String>()
                 ),
             })
         });
@@ -224,7 +225,13 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
             "require-validation" => (
                 "hooks/require_validation.sh",
                 format!(
-                    "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"\n",
+                    "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit (scope '{scope}').\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --scope {scope}{packet_arg}\n",
+                    scope = law.scope.as_str(),
+                    packet_arg = if law.scope == spec::model::ObligationScope::Task {
+                        format!(" --packet \"${{ACTIVE_PACKET:-{packet}}}\"")
+                    } else {
+                        String::new()
+                    },
                     header = prov.hash_header(),
                     playbook = prov.refs.playbook_ref,
                 ),
@@ -246,7 +253,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         out.push(GenFile {
             path: "hooks/approve_commit.sh".to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding (per run).\n# Every commit evaluation is recorded to the Ledger, run-bound like any other decision.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding, each at\n# its declared scope. Every commit evaluation is recorded to the Ledger.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --packet \"${{ACTIVE_PACKET:-{packet}}}\"{requires}\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
             ),

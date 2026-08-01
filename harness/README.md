@@ -1,7 +1,7 @@
 <!--
   GENERATED FROM: harness.patterns.yaml
   SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
-  PLAYBOOK: sha256:f394538e7ede906cdfd440ae75bf0f6eaf62bdc06b75c1c30f905ef6472ba380
+  PLAYBOOK: sha256:aae0d2bb43d17d95c01de7c037ede4a904addaafc9133131aace9cb7a4c64c7e
   GENERATOR: harnessc 0.1.0
   DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 -->
@@ -11,11 +11,11 @@
 Compiled from `harness.patterns.yaml` by `harnessc 0.1.0`.
 
 - source `sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2` — the specification bytes
-- compiler `sha256:e01c35d9404a0716c0b54962c3fb9b4c32dff7b9ec52052ee7c70db444056b1a` — a content digest of the compiler and front-end
+- compiler `sha256:aadf06f94461af19e3bf5da7ce7792ff9e1334bfd41aae1068fb499cecd5cbd1` — a content digest of the compiler and front-end
 implementation source, dependency lock, and toolchain, folded with
 the IR schema and target
 - IR `sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536` — the resolved composition graph
-- **playbook `sha256:f394538e7ede906cdfd440ae75bf0f6eaf62bdc06b75c1c30f905ef6472ba380`** — all of the above; the identity of this compiled
+- **playbook `sha256:aae0d2bb43d17d95c01de7c037ede4a904addaafc9133131aace9cb7a4c64c7e`** — all of the above; the identity of this compiled
 interpretation, and what runtime evidence binds to
 
 A compiled identity is not a runtime identity: every Ledger event also

@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use kernel::clock::now_rfc3339;
 use kernel::event::{Decision, Event, EventLog};
 use kernel::gate::{Approver, AuthMethod, Checkpoint, GateStore, Preconditions};
-use kernel::law::{enforce, Enforcement};
+use kernel::law::Enforcement;
 use kernel::packet::TaskPacket;
 
 #[derive(Parser)]
@@ -76,6 +76,14 @@ enum Command {
         /// The obligation being recorded.
         #[arg(long, default_value = "require-validation")]
         obligation: String,
+        /// The declared scope the debt lives at (run | task | branch |
+        /// workspace | action). The event records the key that scope reads.
+        #[arg(long, default_value = "run")]
+        scope: String,
+        /// Active task packet — required for task scope, whose key is the
+        /// packet's content digest.
+        #[arg(long)]
+        packet: Option<PathBuf>,
         /// The Playbook (spec) content digest governing this run.
         #[arg(long)]
         playbook_ref: Option<String>,
@@ -89,11 +97,16 @@ enum Command {
     PreCommit {
         #[arg(long)]
         ledger: PathBuf,
+        /// Required obligations, each `id` (run scope) or `id:scope` as the
+        /// compiled Playbook declares them.
         #[arg(long = "require")]
         require: Vec<String>,
-        /// The run whose obligations are evaluated (obligations are per-run).
+        /// The run whose obligations are evaluated.
         #[arg(long, default_value = "unknown")]
         run_id: String,
+        /// Active task packet, so task-scoped obligations can be keyed.
+        #[arg(long)]
+        packet: Option<PathBuf>,
         /// The Playbook (compiled interpretation) digest governing this run.
         #[arg(long)]
         playbook_ref: Option<String>,
@@ -107,6 +120,17 @@ enum Command {
         run_id: String,
         #[arg(long, default_value = "require-validation")]
         obligation: String,
+        /// The declared scope being discharged — the event must carry the same
+        /// key the open events did, or it clears nothing.
+        #[arg(long, default_value = "run")]
+        scope: String,
+        /// Active task packet (task scope key).
+        #[arg(long)]
+        packet: Option<PathBuf>,
+        /// The path being validated — required for action scope, where every
+        /// edited path owes its own discharge.
+        #[arg(long)]
+        path: Option<String>,
         /// Shell command whose success is the evidence of discharge (e.g.
         /// "cargo test"). If it fails, nothing is discharged.
         #[arg(long)]
@@ -116,13 +140,37 @@ enum Command {
         playbook_ref: Option<String>,
     },
     /// Law of the Hive: read a spawn request as JSON on stdin and allow (exit 0)
-    /// or refuse (exit 2) it against the Hive's depth and budget caps.
+    /// or refuse (exit 2) it against the Hive's caps. In pool mode
+    /// (--store/--hive/--spawn-id) the budget is RESERVED transactionally
+    /// from the durable pool, so racing spawns cannot jointly overshoot.
     HiveSpawn {
         #[arg(long)]
         max_depth: u32,
+        /// Stateless mode: caller-claimed remaining budget. Racing spawns can
+        /// jointly overshoot in this mode — prefer the pool flags.
         #[arg(long)]
-        budget_remaining: u64,
+        budget_remaining: Option<u64>,
+        /// Pool mode: directory holding <hive>.budget.json.
+        #[arg(long)]
+        store: Option<PathBuf>,
+        /// Pool mode: the Hive whose pool covers this spawn.
+        #[arg(long)]
+        hive: Option<String>,
+        /// Pool mode: reservation key (replay-safe: the same id re-reserving
+        /// the same amount is idempotent).
+        #[arg(long)]
+        spawn_id: Option<String>,
+        /// Ledger to record the spawn decision to.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
+    /// Hive budget-pool operations: create the pool, settle reservations.
+    #[command(subcommand)]
+    Hive(HiveCmd),
     /// Gate operations: request a checkpoint, approve it, or verify it.
     #[command(subcommand)]
     Gate(GateCmd),
@@ -256,6 +304,10 @@ enum GateCmd {
         /// checkpoint declares any required obligations.
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Active task packet, so task-scoped required obligations can be
+        /// keyed at resume.
+        #[arg(long)]
+        packet: Option<PathBuf>,
         /// Trusted-keys registry. Required when the stored approval claims
         /// `signature` auth: the signature is re-verified at resume, so a
         /// rewritten checkpoint fails no matter what the file claims.
@@ -280,6 +332,41 @@ enum LedgerCmd {
     Verify {
         #[arg(long)]
         ledger: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum HiveCmd {
+    /// Create a Hive's durable budget pool (idempotent when the total agrees;
+    /// refused when it does not — a budget is not renegotiated by
+    /// re-declaring it).
+    Init {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        hive: String,
+        #[arg(long)]
+        budget: u64,
+    },
+    /// Settle a spawn's reservation: record what was actually spent (≤
+    /// reserved) and return the remainder to the pool. --spent 0 releases a
+    /// failed or cancelled worker's reservation entirely.
+    Settle {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        hive: String,
+        #[arg(long)]
+        spawn_id: String,
+        #[arg(long)]
+        spent: u64,
+        /// Ledger to record the settlement to.
+        #[arg(long)]
+        ledger: Option<PathBuf>,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
     },
 }
 
@@ -399,20 +486,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             run_id,
             obligation,
+            scope,
+            packet,
             playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
             let path = extract_target_path(&stdin);
+            // The event carries the key its declared scope reads at eval time.
+            let (task_id, scope_refs) = scope_recording(&scope, packet.as_deref())?;
+            let mut input_refs: Vec<String> =
+                path.map(|p| format!("path:{p}")).into_iter().collect();
+            input_refs.extend(scope_refs);
             let event = Event {
                 run_id,
-                task_id: None,
+                task_id,
                 parent_task_id: None,
                 action_id: "post_tool".into(),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: format!("post_tool.obligation.{obligation}"),
-                input_refs: path.map(|p| format!("path:{p}")).into_iter().collect(),
+                input_refs,
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs: vec![],
@@ -427,6 +521,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             require,
             run_id,
+            packet,
             playbook_ref,
         } => {
             let mut stdin = String::new();
@@ -437,7 +532,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 return Ok(ExitCode::SUCCESS);
             }
             let events = EventLog::at(&ledger).read_all().unwrap_or_default();
-            let outstanding = kernel::obligation::outstanding(&events, &require, &run_id);
+            let ctx = kernel::obligation::ScopeContext {
+                run_id: run_id.clone(),
+                task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
+                branch: current_branch(),
+            };
+            let outstanding = kernel::obligation::outstanding(&events, &require, &ctx);
             let allowed = outstanding.is_empty();
             // The decision is evidence either way: which obligations stood in
             // the way of a denial is exactly what an audit needs to see.
@@ -480,9 +580,18 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             ledger,
             run_id,
             obligation,
+            scope,
+            packet,
+            path,
             check,
             playbook_ref,
         } => {
+            if scope == "action" && path.is_none() {
+                return Err(
+                    "action-scoped obligations discharge per path; pass --path <edited-file>"
+                        .into(),
+                );
+            }
             if let Some(cmd) = &check {
                 let status = std::process::Command::new("sh")
                     .arg("-c")
@@ -493,6 +602,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     return Ok(ExitCode::FAILURE);
                 }
             }
+            // The discharge must carry the same key the open events did, or
+            // it clears nothing.
+            let (task_id, scope_refs) = scope_recording(&scope, packet.as_deref())?;
+            let mut input_refs: Vec<String> =
+                path.map(|p| format!("path:{p}")).into_iter().collect();
+            input_refs.extend(scope_refs);
             let evidence_refs = check
                 .as_ref()
                 .map(|c| format!("check:{c}"))
@@ -500,13 +615,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .collect();
             let event = Event {
                 run_id,
-                task_id: None,
+                task_id,
                 parent_task_id: None,
                 action_id: "validate".into(),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: kernel::obligation::discharge_transition(&obligation),
-                input_refs: vec![],
+                input_refs,
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs,
@@ -521,15 +636,99 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::HiveSpawn {
             max_depth,
             budget_remaining,
+            store,
+            hive,
+            spawn_id,
+            ledger,
+            run_id,
+            playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin)?;
             let req: kernel::hive::SpawnRequest = serde_json::from_str(&stdin)
                 .map_err(|e| format!("spawn request is not valid JSON: {e}"))?;
-            match kernel::hive::validate_spawn(&req, max_depth, budget_remaining) {
-                Ok(()) => {
+
+            enum Mode<'a> {
+                Stateless(u64),
+                Pool(&'a std::path::Path, &'a str, &'a str),
+            }
+            let mode = match (
+                budget_remaining,
+                store.as_deref(),
+                hive.as_deref(),
+                spawn_id.as_deref(),
+            ) {
+                (Some(m), None, None, None) => Mode::Stateless(m),
+                (None, Some(s), Some(h), Some(id)) => Mode::Pool(s, h, id),
+                _ => {
+                    return Err("pass either --budget-remaining (stateless) or all of \
+                                --store/--hive/--spawn-id (transactional pool)"
+                        .into())
+                }
+            };
+
+            let outcome: Result<String, String> = match mode {
+                Mode::Stateless(remaining) => {
+                    kernel::hive::validate_spawn(&req, max_depth, remaining)
+                        .map(|()| "caller-claimed budget (stateless mode)".to_string())
+                        .map_err(|e| e.to_string())
+                }
+                Mode::Pool(store, hive, spawn_id) => {
+                    // Field checks first; the budget cap is the POOL's call,
+                    // enforced by the atomic reservation below.
+                    kernel::hive::validate_spawn(&req, max_depth, u64::MAX)
+                        .map_err(|e| e.to_string())
+                        .and_then(|()| {
+                            kernel::hive::BudgetPool::at(store, hive)
+                                .reserve(spawn_id, req.budget)
+                                .map(|state| {
+                                    format!(
+                                        "reserved {} from pool '{hive}' ({} remaining)",
+                                        req.budget,
+                                        state.remaining()
+                                    )
+                                })
+                                .map_err(|e| e.to_string())
+                        })
+                }
+            };
+
+            // A spawn authorization is a governed decision; record it.
+            if let Some(ledger) = &ledger {
+                let mut input_refs = vec![
+                    format!("parent:{}", req.parent),
+                    format!("budget:{}", req.budget),
+                ];
+                if let Some(id) = &spawn_id {
+                    input_refs.push(format!("spawn:{id}"));
+                }
+                let event = Event {
+                    run_id: run_id.clone(),
+                    task_id: None,
+                    parent_task_id: None,
+                    action_id: "hive_spawn".into(),
+                    actor: "kernel".into(),
+                    timestamp: now_rfc3339(),
+                    transition: "hive.spawn".into(),
+                    input_refs,
+                    output_refs: vec![],
+                    decision: if outcome.is_ok() {
+                        Decision::Allowed
+                    } else {
+                        Decision::Denied
+                    },
+                    evidence_refs: vec![],
+                    playbook_ref: playbook_ref.unwrap_or_default(),
+                    kernel_ref: kernel::kernel_ref(),
+                    attempt_id: None,
+                };
+                EventLog::at(ledger).append(&event)?;
+            }
+
+            match outcome {
+                Ok(detail) => {
                     println!(
-                        "spawn authorized: parent={} depth={}",
+                        "spawn authorized: parent={} depth={} — {detail}",
                         req.parent, req.depth
                     );
                     Ok(ExitCode::SUCCESS)
@@ -540,6 +739,71 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
             }
         }
+        Command::Hive(cmd) => match cmd {
+            HiveCmd::Init {
+                store,
+                hive,
+                budget,
+            } => {
+                let state = kernel::hive::BudgetPool::at(&store, &hive).init(budget)?;
+                println!(
+                    "pool '{hive}': total {}, spent {}, reserved {}, remaining {}",
+                    state.total,
+                    state.spent,
+                    state.reserved(),
+                    state.remaining()
+                );
+                Ok(ExitCode::SUCCESS)
+            }
+            HiveCmd::Settle {
+                store,
+                hive,
+                spawn_id,
+                spent,
+                ledger,
+                run_id,
+                playbook_ref,
+            } => {
+                let result = kernel::hive::BudgetPool::at(&store, &hive).settle(&spawn_id, spent);
+                if let Some(ledger) = &ledger {
+                    // Settlement — including a refused overspend — is evidence.
+                    let event = Event {
+                        run_id: run_id.clone(),
+                        task_id: None,
+                        parent_task_id: None,
+                        action_id: "hive_settle".into(),
+                        actor: "kernel".into(),
+                        timestamp: now_rfc3339(),
+                        transition: "hive.settle".into(),
+                        input_refs: vec![format!("spawn:{spawn_id}"), format!("spent:{spent}")],
+                        output_refs: vec![],
+                        decision: if result.is_ok() {
+                            Decision::Recorded
+                        } else {
+                            Decision::Denied
+                        },
+                        evidence_refs: vec![],
+                        playbook_ref: playbook_ref.unwrap_or_default(),
+                        kernel_ref: kernel::kernel_ref(),
+                        attempt_id: None,
+                    };
+                    EventLog::at(ledger).append(&event)?;
+                }
+                match result {
+                    Ok(state) => {
+                        println!(
+                            "settled '{spawn_id}': spent {spent}, pool remaining {}",
+                            state.remaining()
+                        );
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    Err(e) => {
+                        eprintln!("settlement refused: {e}");
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
+            }
+        },
         Command::Gate(cmd) => gate(cmd),
         Command::Registry(cmd) => match cmd {
             RegistryCmd::Sign { registry, key } => {
@@ -691,13 +955,26 @@ fn pre_tool(
         return Ok(ExitCode::SUCCESS);
     };
 
-    let verdict = enforce(&packet, &path, &protected);
+    // Judged against the CANONICAL target: symlinks resolved on the real
+    // filesystem (rooted at the hook's working directory), so a link cannot
+    // launder an out-of-scope or protected target into an authorized name.
+    let verdict = kernel::law::enforce_at(std::path::Path::new("."), &packet, &path, &protected);
     let (decision, transition) = match &verdict {
         Enforcement::Allow => (Decision::Allowed, "pre_tool.edit"),
         // A distinct, auditable transition when an enforcement artifact is amended.
         Enforcement::AllowAmendment => (Decision::Allowed, "pre_tool.enforcement_amendment"),
         Enforcement::Deny(_) => (Decision::Denied, "pre_tool.edit"),
     };
+
+    // Evidence names the real target too: an allowed write through a symlink
+    // must be attributable to where it actually landed.
+    let mut input_refs = vec![format!("path:{path}")];
+    if let Ok(canonical) = kernel::fsutil::canonical_workspace_rel(std::path::Path::new("."), &path)
+    {
+        if canonical != path {
+            input_refs.push(format!("canonical:{canonical}"));
+        }
+    }
 
     if let Some(ledger) = ledger {
         let event = Event {
@@ -708,7 +985,7 @@ fn pre_tool(
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: transition.into(),
-            input_refs: vec![format!("path:{path}")],
+            input_refs: input_refs.clone(),
             output_refs: vec![],
             decision,
             evidence_refs: vec![],
@@ -953,6 +1230,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             action_hash,
             preconditions,
             ledger,
+            packet,
             trusted_keys,
             authority,
         } => {
@@ -973,8 +1251,13 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     );
                 };
                 let events = EventLog::at(ledger).read_all()?;
+                let ctx = kernel::obligation::ScopeContext {
+                    run_id: cp.run_id.clone(),
+                    task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
+                    branch: current_branch(),
+                };
                 let outstanding =
-                    kernel::obligation::outstanding(&events, &cp.requires_obligations, &cp.run_id);
+                    kernel::obligation::outstanding(&events, &cp.requires_obligations, &ctx);
                 if let Err(e) = cp.check_obligations(&outstanding) {
                     eprintln!("gate refused: {e}");
                     return Ok(ExitCode::FAILURE);
@@ -1048,6 +1331,51 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("approval valid");
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// The current git branch, when one can be determined — the key branch-scoped
+/// obligations live at. `None` (detached HEAD, not a repo, no git) makes the
+/// fail-safe rule apply: unprovable debts block.
+fn current_branch() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD")
+}
+
+/// The scope-relevant identity an obligation event must carry: the task key
+/// (packet content digest) and/or branch ref, per the declared scope. Returns
+/// (task_id, extra input_refs). Task scope without a packet is an error — the
+/// key cannot be invented, and an unkeyed event would block everyone.
+fn scope_recording(
+    scope: &str,
+    packet: Option<&std::path::Path>,
+) -> Result<(Option<String>, Vec<String>), Box<dyn std::error::Error>> {
+    let scope = kernel::obligation::Scope::parse(scope)
+        .ok_or_else(|| format!("unknown obligation scope '{scope}'"))?;
+    match scope {
+        kernel::obligation::Scope::Task => {
+            let packet =
+                packet.ok_or("task-scoped obligations need --packet to derive the task key")?;
+            Ok((Some(hash_file(packet)?), vec![]))
+        }
+        kernel::obligation::Scope::Branch => {
+            // Record what we can determine; an unknown branch records nothing
+            // and the unkeyed debt blocks everyone — fail-safe, not silent.
+            Ok((
+                None,
+                current_branch()
+                    .map(|b| format!("branch:{b}"))
+                    .into_iter()
+                    .collect(),
+            ))
+        }
+        _ => Ok((None, vec![])),
     }
 }
 

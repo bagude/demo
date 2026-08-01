@@ -181,6 +181,7 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
             "pipelines": pipelines,
             "ports": ports,
             "hives": hives,
+            "graph": crate::common::graph_json(compiled),
             "kernel": { "entrypoint": "kernel" },
         }),
     )

@@ -7,8 +7,12 @@
 //! checker can ask structural questions: *which patterns are present?* and
 //! *what is running within what?*
 //!
-//! Occurrences are **instance-addressable**. A bare `Port` is an anonymous
-//! occurrence standing for every Port binding; `Port[staging]` names one. The
+//! Occurrences are **instance-addressable** and positions are **nameable**. A
+//! bare `Port` is an anonymous occurrence standing for every Port binding;
+//! `Port[staging]` names one binding; `Port[github as staging_deployer]`
+//! additionally declares the *position's* name, distinct from the binding —
+//! two positions may share one implementation yet be named apart — and
+//! `Sandbox[as worker_sandbox]` names a position of a singleton kind. The
 //! relational queries take a [`Sel`] so the checker can ask about a category
 //! (*is some Port within some Sandbox?*) or one component (*is `Port[staging]`
 //! within `Sandbox[worker]`?*). Which *bindings* stand in a relation is
@@ -362,6 +366,7 @@ enum Token {
     Arrow,    // ->
     FatArrow, // =>
     Within,
+    As,    // reserved inside instance brackets: `[github as staging]`
     Times, // ×
     LParen,
     RParen,
@@ -427,10 +432,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                if word == "within" {
-                    tokens.push(Token::Within);
-                } else {
-                    tokens.push(Token::Ident(word));
+                match word.as_str() {
+                    "within" => tokens.push(Token::Within),
+                    "as" => tokens.push(Token::As),
+                    _ => tokens.push(Token::Ident(word)),
                 }
             }
             other => return Err(format!("unexpected character '{other}' in composition")),
@@ -529,29 +534,56 @@ impl Parser {
             }
             Some(Token::Ident(name)) => {
                 let kind = name.parse::<PatternKind>()?;
-                let id = self.parse_optional_instance_id()?;
-                Ok(Expr::Pattern(PatternInstance { kind, id }))
+                let (id, alias) = self.parse_optional_instance_brackets()?;
+                Ok(Expr::Pattern(PatternInstance { kind, id, alias }))
             }
             other => Err(format!("expected a pattern or '(', got {other:?}")),
         }
     }
 
-    /// After a pattern name, an optional `[id]` naming which binding it refers
-    /// to. `Port` yields `None`; `Port[staging]` yields `Some("staging")`.
-    fn parse_optional_instance_id(&mut self) -> Result<Option<String>, String> {
+    /// After a pattern name, an optional bracket clause:
+    ///
+    /// * `[id]`          — this occurrence names binding `id`
+    /// * `[id as alias]` — names binding `id` AND declares the position's name
+    /// * `[as alias]`    — anonymous binding, named position (the only way a
+    ///   singleton kind, which has no binding id, gets a nameable position)
+    ///
+    /// `as` is a reserved word inside brackets, so a binding literally named
+    /// `as` is unaddressable (the checker rejects such ids at the source).
+    fn parse_optional_instance_brackets(
+        &mut self,
+    ) -> Result<(Option<String>, Option<String>), String> {
         if !matches!(self.peek(), Some(Token::LBracket)) {
-            return Ok(None);
+            return Ok((None, None));
         }
         self.next(); // consume '['
-        let id = match self.next() {
-            Some(Token::Ident(s)) => s,
-            Some(Token::Number(n)) => n.to_string(),
-            other => return Err(format!("expected an instance id after '[', got {other:?}")),
+        let id = match self.peek() {
+            Some(Token::Ident(_)) | Some(Token::Number(_)) => match self.next() {
+                Some(Token::Ident(s)) => Some(s),
+                Some(Token::Number(n)) => Some(n.to_string()),
+                _ => unreachable!(),
+            },
+            _ => None,
         };
+        let alias = if matches!(self.peek(), Some(Token::As)) {
+            self.next(); // consume 'as'
+            match self.next() {
+                Some(Token::Ident(s)) => Some(s),
+                other => return Err(format!("expected an alias after 'as', got {other:?}")),
+            }
+        } else {
+            None
+        };
+        if id.is_none() && alias.is_none() {
+            return Err(
+                "empty instance brackets: expected `[id]`, `[id as alias]`, or `[as alias]`"
+                    .to_string(),
+            );
+        }
         match self.next() {
-            Some(Token::RBracket) => Ok(Some(id)),
+            Some(Token::RBracket) => Ok((id, alias)),
             other => Err(format!(
-                "expected ']' after instance id '{id}', got {other:?}"
+                "expected ']' to close instance brackets, got {other:?}"
             )),
         }
     }
@@ -688,6 +720,66 @@ mod tests {
         // Port's output reaches the Gate through the Night Shift.
         assert!(e.flows_to(PatternKind::Port, PatternKind::Gate));
         assert!(e.flows_to(PatternKind::NightShift, PatternKind::Gate));
+    }
+
+    #[test]
+    fn parses_position_aliases() {
+        // Two positions, one binding, named apart.
+        let e = parse(
+            "Port[github as staging_deployer] within Sandbox + Port[github as release_annotator]",
+        )
+        .unwrap();
+        let mut aliases = Vec::new();
+        fn walk(e: &Expr, out: &mut Vec<(Option<String>, Option<String>)>) {
+            match e {
+                Expr::Pattern(i) => out.push((i.id.clone(), i.alias.clone())),
+                Expr::Coexist(a, b)
+                | Expr::Seq(a, b)
+                | Expr::Provision(a, b)
+                | Expr::Within(a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+                Expr::Replicate(a, _) => walk(a, out),
+            }
+        }
+        walk(&e, &mut aliases);
+        let ports: Vec<_> = aliases.iter().filter(|(id, _)| id.is_some()).collect();
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].1.as_deref(), Some("staging_deployer"));
+        assert_eq!(ports[1].1.as_deref(), Some("release_annotator"));
+
+        // A singleton position can be named even without a binding id.
+        let s = parse("Verb within Sandbox[as worker_sandbox]").unwrap();
+        let mut v = Vec::new();
+        walk(&s, &mut v);
+        assert!(v
+            .iter()
+            .any(|(id, a)| id.is_none() && a.as_deref() == Some("worker_sandbox")));
+    }
+
+    #[test]
+    fn alias_display_round_trips() {
+        use crate::model::PatternInstance;
+        let i = PatternInstance {
+            kind: PatternKind::Port,
+            id: Some("github".into()),
+            alias: Some("staging".into()),
+        };
+        assert_eq!(i.to_string(), "Port[github as staging]");
+        let s = PatternInstance {
+            kind: PatternKind::Sandbox,
+            id: None,
+            alias: Some("worker".into()),
+        };
+        assert_eq!(s.to_string(), "Sandbox[as worker]");
+    }
+
+    #[test]
+    fn rejects_malformed_alias_brackets() {
+        assert!(parse("Port[]").is_err());
+        assert!(parse("Port[as]").is_err());
+        assert!(parse("Port[github as]").is_err());
     }
 
     #[test]

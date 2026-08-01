@@ -89,7 +89,12 @@ pub fn compile(yaml: &str, binding: &dyn Binding) -> Result<CompiledSpec, Compil
     let composition =
         compose::parse(&spec.composition.expression).map_err(CompileError::Composition)?;
 
-    let diagnostics = check(&spec, &composition, binding);
+    // One IR: the graph is resolved exactly once, and the SAME instance is
+    // checked, carried on the compiled spec, serialized, and generated from —
+    // so "the compiler checked a different interpretation than it generated"
+    // is structurally impossible.
+    let graph = ResolvedGraph::resolve(&composition, &spec.bindings);
+    let diagnostics = check(&spec, &composition, &graph, binding);
     let errors: Vec<Diagnostic> = diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
@@ -103,7 +108,6 @@ pub fn compile(yaml: &str, binding: &dyn Binding) -> Result<CompiledSpec, Compil
         .into_iter()
         .filter(|d| d.severity == Severity::Warning)
         .collect();
-    let graph = ResolvedGraph::resolve(&composition, &spec.bindings);
     Ok(CompiledSpec {
         spec,
         composition,

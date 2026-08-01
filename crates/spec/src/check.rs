@@ -65,18 +65,25 @@ impl std::fmt::Display for Diagnostic {
 /// whose drift should invalidate approval.
 const NON_PRECONDITION_BINDINGS: &[&str] = &["action_hash", "approver", "expiry"];
 
-/// Run every check against a parsed spec, its composition tree, and the target
-/// binding's capabilities. Returns all diagnostics; the caller treats any
-/// `Error` as blocking.
-pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnostic> {
-    // Lower the expression into the resolved graph first: activation (which
-    // bindings the composition makes part of the architecture) scopes the
-    // coverage warnings and the composition case law below.
-    let graph = ResolvedGraph::resolve(expr, &spec.bindings);
+/// Run every check against a parsed spec, its composition tree, the resolved
+/// graph, and the target binding's capabilities. Returns all diagnostics; the
+/// caller treats any `Error` as blocking.
+///
+/// The graph is passed in — not resolved here — so the instance that is
+/// checked is literally the instance the compiler carries forward to
+/// serialization and generation.
+pub fn check(
+    spec: &SpecFile,
+    expr: &Expr,
+    graph: &ResolvedGraph,
+    binding: &dyn Binding,
+) -> Vec<Diagnostic> {
     let mut d = Vec::new();
     check_cross_reference(spec, expr, &mut d);
     check_instance_references(spec, expr, &mut d);
-    check_active_coverage(spec, &graph, &mut d);
+    check_active_coverage(spec, graph, &mut d);
+    check_aliases(spec, graph, &mut d);
+    check_enforcement_activation(spec, graph, &mut d);
     check_gate(spec, &mut d);
     check_laws(spec, binding, &mut d);
     check_ledger(spec, &mut d);
@@ -85,7 +92,7 @@ pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnos
     check_ports(spec, &mut d);
     check_hives(spec, &mut d);
     check_specialists(spec, &mut d);
-    check_composition(spec, &graph, binding, &mut d);
+    check_composition(spec, graph, binding, &mut d);
     d
 }
 
@@ -194,6 +201,9 @@ fn id_is_addressable(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        // Grammar keywords can never be read back as an id.
+        && id != "as"
+        && id != "within"
 }
 
 fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) {
@@ -281,7 +291,6 @@ fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnosti
 fn check_active_coverage(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>) {
     let b = &spec.bindings;
     for (kind, label) in [
-        (PatternKind::Law, "law"),
         (PatternKind::Specialist, "specialist"),
         (PatternKind::Delegate, "delegate"),
         (PatternKind::Pipeline, "pipeline"),
@@ -305,6 +314,93 @@ fn check_active_coverage(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Dia
                     ),
                 ));
             }
+        }
+    }
+}
+
+/// Position aliases (`Port[github as staging_deployer]`) name architectural
+/// positions apart from binding identity. For the name to *be* an identity it
+/// must be unambiguous: unique across the whole composition, and not shadowing
+/// any addressable binding id (a reader of `staging` must never wonder whether
+/// a position or a binding is meant).
+fn check_aliases(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>) {
+    let b = &spec.bindings;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for node in graph.nodes() {
+        let Some(alias) = node.alias.as_deref() else {
+            continue;
+        };
+        if !seen.insert(alias) {
+            d.push(Diagnostic::error(
+                "composition.duplicate_alias",
+                format!(
+                    "alias '{alias}' names more than one position; a position name must be unique \
+                     across the composition"
+                ),
+            ));
+        }
+        if let Some(kind) = ADDRESSABLE_KINDS
+            .iter()
+            .copied()
+            .find(|k| addressable_ids(b, *k).is_some_and(|ids| ids.contains(&alias)))
+        {
+            d.push(Diagnostic::error(
+                "composition.alias_shadows_binding",
+                format!(
+                    "alias '{alias}' is also the id of a {kind} binding; a position name must not \
+                     shadow a binding id"
+                ),
+            ));
+        }
+    }
+}
+
+/// Enforcement activation is explicit, never ambient.
+///
+/// Capability exclusion is fail-safe, but surplus enforcement is NOT: an
+/// unactivated Guard can block actions the declared architecture permits, an
+/// unactivated Obligation opens debt no active workflow discharges, an
+/// unactivated Gate halts progress nothing expects, and an unactivated Ledger
+/// records (discloses) beyond the declared system. So a bound enforcement
+/// binding must be (1) activated by a composition occurrence, (2) activated
+/// through a binding dependency (a `uses` edge), or (3) explicitly declared
+/// `always_on: true` — anything else is a compile error, not an automatically
+/// installed safety surplus.
+fn check_enforcement_activation(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>) {
+    let b = &spec.bindings;
+    for law in &b.laws {
+        if !law.always_on && !graph.is_active(PatternKind::Law, &law.id) {
+            d.push(Diagnostic::error(
+                "composition.enforcement_not_activated",
+                format!(
+                    "law '{}' is bound but nothing activates it; enforcement is never installed \
+                     implicitly — reference it in the composition, depend on it from an active \
+                     binding, declare `always_on: true`, or remove it",
+                    law.id
+                ),
+            ));
+        }
+    }
+    if let Some(gate) = &b.gate {
+        if !gate.always_on && !graph.is_active(PatternKind::Gate, &gate.id) {
+            d.push(Diagnostic::error(
+                "composition.enforcement_not_activated",
+                format!(
+                    "gate '{}' is bound but nothing activates it; an unactivated Gate would halt \
+                     progress no active workflow expects — reference it in the composition, \
+                     declare `always_on: true`, or remove it",
+                    gate.id
+                ),
+            ));
+        }
+    }
+    if let Some(ledger) = &b.ledger {
+        if !ledger.always_on && !graph.has_kind(PatternKind::Ledger) {
+            d.push(Diagnostic::error(
+                "composition.enforcement_not_activated",
+                "a Ledger is bound but nothing references it; recording is disclosure — \
+                 reference it in the composition, declare `always_on: true`, or remove it",
+            ));
         }
     }
 }
@@ -821,7 +917,8 @@ platform:
     fn check_yaml(yaml: &str) -> Vec<Diagnostic> {
         let spec: SpecFile = serde_yaml::from_str(yaml).expect("parses");
         let expr = crate::compose::parse(&spec.composition.expression).expect("composition parses");
-        check(&spec, &expr, &MockBinding)
+        let graph = ResolvedGraph::resolve(&expr, &spec.bindings);
+        check(&spec, &expr, &graph, &MockBinding)
     }
 
     fn codes(diags: &[Diagnostic]) -> Vec<&'static str> {
@@ -1093,8 +1190,66 @@ platform: { type: claude-code }
             !c.contains(&"composition.obligation_not_discharged"),
             "an inactive obligation law must not become a gate requirement: {diags:?}"
         );
-        // The exclusion is visible, not silent.
-        assert!(c.contains(&"composition.binding_not_activated"));
+        // And enforcement activation is explicit: the bound-but-unactivated law
+        // is a compile ERROR demanding a decision (activate, always_on, or
+        // remove) — never a silently installed or silently dropped mechanism.
+        assert!(c.contains(&"composition.enforcement_not_activated"));
+    }
+
+    #[test]
+    fn always_on_declares_unreferenced_enforcement_explicitly() {
+        // Same spec, but the obligation law carries `always_on: true`: the
+        // author has explicitly declared the surplus enforcement, so it
+        // compiles — and being active by declaration, the Gate must discharge
+        // it like any other active obligation.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Intake -> Verb within (Law[enforce-file-scope] + Gate) + Ledger"
+bindings:
+  intake: { task_schema: s.json, storage: tasks/ }
+  verb: { name: v, command: c.md, accepts: A, produces: B }
+  laws:
+    - { id: enforce-file-scope, kind: guard, event: pre_tool, applies_to: [edit] }
+    - { id: require-validation, kind: obligation, event: post_tool, applies_to: [edit], always_on: true }
+  gate:
+    id: g
+    boundary: before_commit
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+    requires_obligations: [require-validation]
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let c = codes(&check_yaml(yaml));
+        assert!(!c.contains(&"composition.enforcement_not_activated"));
+        assert!(!c.contains(&"composition.obligation_not_discharged"));
+    }
+
+    #[test]
+    fn unactivated_gate_is_rejected_not_installed() {
+        // A Gate bound but absent from the composition would halt progress no
+        // active workflow expects — reject, do not install.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Intake -> Verb within Law"
+bindings:
+  intake: { task_schema: s.json, storage: tasks/ }
+  verb: { name: v, command: c.md, accepts: A, produces: B }
+  laws:
+    - { id: enforce-file-scope, kind: guard, event: pre_tool, applies_to: [edit] }
+  gate:
+    id: g
+    boundary: before_commit
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.enforcement_not_activated"));
     }
 
     #[test]
@@ -1152,6 +1307,71 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(codes(&check_yaml(yaml)).contains(&"binding.unaddressable_id"));
+    }
+
+    #[test]
+    fn duplicate_aliases_are_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging as edge] within Sandbox + Port[metrics as edge]"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+    - { id: metrics, server: b, write: [y], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.duplicate_alias"));
+    }
+
+    #[test]
+    fn alias_shadowing_a_binding_id_is_rejected() {
+        // Naming a position `metrics` while a Port binding `metrics` exists
+        // would make every later mention of `metrics` ambiguous.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging as metrics] within Sandbox"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+    - { id: metrics, server: b, write: [y], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        let c = codes(&check_yaml(yaml));
+        assert!(c.contains(&"composition.alias_shadows_binding"));
+    }
+
+    #[test]
+    fn singleton_position_alias_is_allowed_where_binding_id_is_not() {
+        // `Sandbox[worker]` is unaddressable (no binding id namespace), but
+        // `Sandbox[as worker]` names the POSITION, which is exactly what a
+        // singleton kind needs.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging] within Sandbox[as worker] + Law + Ledger"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let c = codes(&check_yaml(yaml));
+        assert!(!c.contains(&"composition.unaddressable_pattern"));
+        assert!(!c.contains(&"composition.duplicate_alias"));
     }
 
     #[test]

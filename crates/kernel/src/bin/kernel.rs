@@ -126,6 +126,9 @@ enum Command {
     /// Gate operations: request a checkpoint, approve it, or verify it.
     #[command(subcommand)]
     Gate(GateCmd),
+    /// Ledger chain operations: prove the append-only log's integrity.
+    #[command(subcommand)]
+    Ledger(LedgerCmd),
     /// Append one event to the Ledger.
     Event {
         #[arg(long)]
@@ -212,6 +215,19 @@ enum GateCmd {
         /// checkpoint declares any required obligations.
         #[arg(long)]
         ledger: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LedgerCmd {
+    /// Walk the Ledger's hash chain: every record's `prev` must hash the exact
+    /// line before it and `seq` must be contiguous. Detects mutation,
+    /// insertion, mid-deletion, and reordering anywhere in history (including
+    /// a frozen legacy prefix). Tail truncation is provable only against an
+    /// externally anchored head — which this prints for exactly that purpose.
+    Verify {
+        #[arg(long)]
+        ledger: PathBuf,
     },
 }
 
@@ -437,6 +453,27 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Gate(cmd) => gate(cmd),
+        Command::Ledger(LedgerCmd::Verify { ledger }) => {
+            match EventLog::at(&ledger).verify_chain() {
+                Ok(report) => {
+                    println!(
+                        "chain ok: {} record(s), {} chained{}",
+                        report.records,
+                        report.chained,
+                        report
+                            .head
+                            .as_deref()
+                            .map(|h| format!(", head {h}"))
+                            .unwrap_or_default()
+                    );
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => {
+                    eprintln!("ledger chain broken: {e}");
+                    Ok(ExitCode::FAILURE)
+                }
+            }
+        }
         Command::Event {
             ledger,
             run_id,

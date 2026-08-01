@@ -7,6 +7,24 @@
 //! records join across nested executors and resumptions, and the **secrecy
 //! rule**: the envelope carries *references and hashes*, never raw payloads, so
 //! an append-only log can never become a durable credential leak.
+//!
+//! **Tamper evidence.** "Append-only" was a posture (the file is opened in
+//! append mode); the hash chain makes it a *property*. Every appended line is
+//! a [`Record`]: the event plus a contiguous `seq` and a `prev` digest of the
+//! previous line's exact bytes ([`CHAIN_GENESIS`] for the first).
+//! [`EventLog::verify_chain`] then detects mutation, insertion, mid-deletion,
+//! and reordering anywhere in the history — including a legacy prefix of
+//! unchained records, which the first chained record's `prev` freezes. The one
+//! thing a chain cannot prove is **tail truncation**: deleting the newest
+//! records leaves a shorter but internally consistent chain. That requires
+//! anchoring the chain *head* (the digest of the last line, reported by
+//! `verify_chain`) somewhere outside the file — a Gate checkpoint, a push, a
+//! signed note. The chain makes the log self-verifying up to its head; the
+//! head is the caller's to anchor.
+//!
+//! Concurrent appenders are not serialized by this handle; racing writers
+//! produce a visible fork (duplicate `seq`, dangling `prev`) that
+//! `verify_chain` reports rather than a silently merged history.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
@@ -88,6 +106,73 @@ pub struct Event {
     pub attempt_id: Option<String>,
 }
 
+/// The `prev` value of the first record in a chain — a sentinel, distinct
+/// from every possible `sha256:` digest.
+pub const CHAIN_GENESIS: &str = "genesis";
+
+/// Digest of one serialized Ledger line — the unit the hash chain links.
+pub fn line_digest(line: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(line.as_bytes());
+    let mut s = String::from("sha256:");
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// One serialized Ledger line: an [`Event`] under the hash chain. `seq` and
+/// `prev` are properties of the *log*, not of the event — they are assigned
+/// at append time, and their integrity is what [`EventLog::verify_chain`]
+/// proves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
+    /// Position in the chain, contiguous from 0.
+    pub seq: u64,
+    /// Digest of the previous line's exact bytes; [`CHAIN_GENESIS`] for the
+    /// first record.
+    pub prev: String,
+    #[serde(flatten)]
+    pub event: Event,
+}
+
+/// Why a Ledger hash chain failed verification, and where.
+#[derive(Debug)]
+pub enum ChainError {
+    Io(io::Error),
+    Broken { line: usize, reason: String },
+}
+
+impl std::fmt::Display for ChainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainError::Io(e) => write!(f, "io: {e}"),
+            ChainError::Broken { line, reason } => write!(f, "line {line}: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for ChainError {}
+
+impl From<io::Error> for ChainError {
+    fn from(e: io::Error) -> Self {
+        ChainError::Io(e)
+    }
+}
+
+/// The result of a successful chain walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainReport {
+    /// Total records in the log.
+    pub records: usize,
+    /// How many carry chain fields — the suffix after any legacy prefix.
+    pub chained: usize,
+    /// Digest of the final line — the chain **head**. Anchor it outside the
+    /// file (a checkpoint, a push, a signed note): the chain proves everything
+    /// except tail truncation, which only an out-of-band head can catch.
+    pub head: Option<String>,
+}
+
 /// A handle to an append-only event log file (JSON lines).
 pub struct EventLog {
     path: PathBuf,
@@ -102,15 +187,24 @@ impl EventLog {
         &self.path
     }
 
-    /// Append one event as a JSON line, creating the file and parent directory
-    /// if needed. Opened strictly in append mode.
+    /// Append one event as a chained [`Record`] line, creating the file and
+    /// parent directory if needed. Opened strictly in append mode. The record
+    /// carries the next contiguous `seq` and a `prev` digest of the last line
+    /// — whatever kind of line that is, so a pre-chain (legacy) history is
+    /// frozen under the chain the moment the first chained record lands.
     pub fn append(&self, event: &Event) -> io::Result<()> {
         if let Some(parent) = self.path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
             }
         }
-        let mut line = serde_json::to_string(event)
+        let (seq, prev) = self.chain_tail()?;
+        let record = Record {
+            seq,
+            prev,
+            event: event.clone(),
+        };
+        let mut line = serde_json::to_string(&record)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         line.push('\n');
         let mut file = OpenOptions::new()
@@ -122,6 +216,119 @@ impl EventLog {
         // Durably persist the appended record so a host failure cannot lose an
         // already-acknowledged governed event.
         file.sync_all()
+    }
+
+    /// The chain state the next record must carry: its `seq` and the digest of
+    /// the current last line. An empty or missing log starts the chain at
+    /// (0, [`CHAIN_GENESIS`]); a legacy (unchained) tail also restarts `seq`
+    /// at 0 while `prev` commits to that tail's bytes.
+    fn chain_tail(&self) -> io::Result<(u64, String)> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok((0, CHAIN_GENESIS.to_string()))
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(last) = text.lines().rev().find(|l| !l.trim().is_empty()) else {
+            return Ok((0, CHAIN_GENESIS.to_string()));
+        };
+        let seq = serde_json::from_str::<serde_json::Value>(last)
+            .ok()
+            .and_then(|v| v.get("seq").and_then(|s| s.as_u64()))
+            .map(|s| s + 1)
+            .unwrap_or(0);
+        Ok((seq, line_digest(last)))
+    }
+
+    /// Walk the whole log and prove the chain: every chained record's `prev`
+    /// must hash the exact line before it, and `seq` must be contiguous from
+    /// 0. A legacy prefix of unchained records is admitted — and frozen, since
+    /// the first chained record's `prev` commits to it — but an unchained
+    /// record *after* chained history is a break. Returns the [`ChainReport`]
+    /// whose `head` is what tail-truncation detection must anchor externally.
+    pub fn verify_chain(&self) -> Result<ChainReport, ChainError> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(ChainReport {
+                    records: 0,
+                    chained: 0,
+                    head: None,
+                })
+            }
+            Err(e) => return Err(ChainError::Io(e)),
+        };
+        let mut records = 0usize;
+        let mut chained = 0usize;
+        let mut prev_hash: Option<String> = None;
+        let mut next_seq: Option<u64> = None;
+        for (i, line) in text.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+            let n = i + 1;
+            records += 1;
+            let v: serde_json::Value =
+                serde_json::from_str(line).map_err(|e| ChainError::Broken {
+                    line: n,
+                    reason: format!("not valid JSON: {e}"),
+                })?;
+            let has_chain = v.get("seq").is_some() || v.get("prev").is_some();
+            if !has_chain {
+                if next_seq.is_some() {
+                    return Err(ChainError::Broken {
+                        line: n,
+                        reason: "unchained record after chained history (insertion or rewrite)"
+                            .into(),
+                    });
+                }
+                // Legacy prefix: not self-verifying, but frozen — the first
+                // chained record's prev commits to the last legacy line.
+            } else {
+                let seq =
+                    v.get("seq")
+                        .and_then(|s| s.as_u64())
+                        .ok_or_else(|| ChainError::Broken {
+                            line: n,
+                            reason: "chained record has no valid seq".into(),
+                        })?;
+                let prev =
+                    v.get("prev")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| ChainError::Broken {
+                            line: n,
+                            reason: "chained record has no prev digest".into(),
+                        })?;
+                let want_prev = prev_hash
+                    .clone()
+                    .unwrap_or_else(|| CHAIN_GENESIS.to_string());
+                if prev != want_prev {
+                    return Err(ChainError::Broken {
+                        line: n,
+                        reason: format!(
+                            "prev-link mismatch: record claims {prev}, history hashes to \
+                             {want_prev} (a preceding record was altered, removed, or reordered)"
+                        ),
+                    });
+                }
+                let want_seq = next_seq.unwrap_or(0);
+                if seq != want_seq {
+                    return Err(ChainError::Broken {
+                        line: n,
+                        reason: format!(
+                            "sequence break: expected seq {want_seq}, found {seq} (a fork or \
+                             splice)"
+                        ),
+                    });
+                }
+                next_seq = Some(seq + 1);
+                chained += 1;
+            }
+            prev_hash = Some(line_digest(line));
+        }
+        Ok(ChainReport {
+            records,
+            chained,
+            head: prev_hash,
+        })
     }
 
     /// Read every event in insertion order. A missing log reads as empty.
@@ -219,5 +426,137 @@ mod tests {
         assert!(json.contains("input_refs"));
         assert!(!json.contains("raw_input"));
         assert!(!json.contains("payload"));
+    }
+
+    // ---- hash chain ---------------------------------------------------------
+
+    fn chained_log(dir: &std::path::Path, n: usize) -> EventLog {
+        let log = EventLog::at(dir.join("events.jsonl"));
+        for _ in 0..n {
+            log.append(&event(Decision::Allowed)).unwrap();
+        }
+        log
+    }
+
+    #[test]
+    fn appended_records_form_a_verifiable_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 3);
+        let report = log.verify_chain().unwrap();
+        assert_eq!((report.records, report.chained), (3, 3));
+        assert!(report.head.is_some(), "the head exists to be anchored");
+
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("\"seq\":0"));
+        assert!(lines[0].contains(&format!("\"prev\":\"{CHAIN_GENESIS}\"")));
+        assert!(lines[2].contains("\"seq\":2"));
+        // read_all still consumes the events, chain fields and all.
+        assert_eq!(log.read_all().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn tampering_a_middle_record_breaks_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 3);
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        // Flip one decision in the middle record: same shape, different bytes.
+        let lines: Vec<String> = text
+            .lines()
+            .enumerate()
+            .map(|(i, l)| {
+                if i == 1 {
+                    l.replace("\"allowed\"", "\"denied\"")
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        std::fs::write(log.path(), lines.join("\n") + "\n").unwrap();
+        let err = log.verify_chain().unwrap_err();
+        assert!(
+            err.to_string().contains("line 3") && err.to_string().contains("prev-link"),
+            "the record AFTER the tampered one exposes it: {err}"
+        );
+    }
+
+    #[test]
+    fn deleting_or_reordering_a_middle_record_breaks_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 3);
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+
+        // Mid-deletion: splice out record 1.
+        std::fs::write(log.path(), format!("{}\n{}\n", lines[0], lines[2])).unwrap();
+        assert!(log.verify_chain().is_err(), "mid-deletion is detected");
+
+        // Reordering: swap records 0 and 1.
+        std::fs::write(
+            log.path(),
+            format!("{}\n{}\n{}\n", lines[1], lines[0], lines[2]),
+        )
+        .unwrap();
+        assert!(log.verify_chain().is_err(), "reordering is detected");
+    }
+
+    #[test]
+    fn a_legacy_prefix_is_frozen_under_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = EventLog::at(dir.path().join("events.jsonl"));
+        // A pre-chain record, written by an older kernel: a bare Event line.
+        let legacy = serde_json::to_string(&event(Decision::Recorded)).unwrap();
+        std::fs::write(log.path(), format!("{legacy}\n")).unwrap();
+
+        log.append(&event(Decision::Allowed)).unwrap();
+        log.append(&event(Decision::Denied)).unwrap();
+        let report = log.verify_chain().unwrap();
+        assert_eq!((report.records, report.chained), (3, 2));
+
+        // The first chained record committed to the legacy line's bytes, so
+        // even the pre-chain history cannot be silently rewritten.
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let tampered = text.replacen("\"recorded\"", "\"approved\"", 1);
+        std::fs::write(log.path(), tampered).unwrap();
+        let err = log.verify_chain().unwrap_err();
+        assert!(
+            err.to_string().contains("prev-link"),
+            "legacy tampering surfaces at the first chained record: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unchained_record_after_chained_history_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 1);
+        // An appender that bypasses the chain (or a hand-inserted line).
+        let bare = serde_json::to_string(&event(Decision::Allowed)).unwrap();
+        let mut text = std::fs::read_to_string(log.path()).unwrap();
+        text.push_str(&format!("{bare}\n"));
+        std::fs::write(log.path(), text).unwrap();
+        let err = log.verify_chain().unwrap_err();
+        assert!(err.to_string().contains("unchained record"), "{err}");
+    }
+
+    #[test]
+    fn tail_truncation_is_visible_only_through_the_anchored_head() {
+        // The chain's honest limitation, pinned as a test so it stays stated:
+        // dropping the newest records leaves an internally consistent chain,
+        // and only comparing heads against an external anchor exposes it.
+        let dir = tempfile::tempdir().unwrap();
+        let log = chained_log(dir.path(), 3);
+        let full_head = log.verify_chain().unwrap().head.unwrap();
+
+        let text = std::fs::read_to_string(log.path()).unwrap();
+        let truncated: Vec<&str> = text.lines().take(2).collect();
+        std::fs::write(log.path(), truncated.join("\n") + "\n").unwrap();
+
+        let report = log.verify_chain().unwrap();
+        assert_eq!(report.records, 2, "the chain itself still verifies");
+        assert_ne!(
+            report.head.unwrap(),
+            full_head,
+            "but the head no longer matches the anchored one"
+        );
     }
 }

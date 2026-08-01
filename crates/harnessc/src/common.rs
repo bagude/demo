@@ -546,8 +546,10 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
+        "required": ["seq", "prev", "run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
         "properties": {
+            "seq": { "type": "integer", "minimum": 0 },
+            "prev": { "type": "string" },
             "run_id": { "type": "string" },
             "task_id": { "type": "string" },
             "parent_task_id": { "type": "string" },
@@ -665,10 +667,11 @@ mod tests {
     }
 
     #[test]
-    fn event_schema_requires_both_run_binding_identities() {
-        // A governed event must carry which Playbook governed it AND which
-        // kernel executed it; the schema makes both mandatory rather than
-        // conventional. (Legacy records carry explicit empty strings.)
+    fn event_schema_requires_run_binding_and_chain_fields() {
+        // A governed record must carry which Playbook governed it, which
+        // kernel executed it, AND its position in the hash chain; the schema
+        // makes all of it mandatory rather than conventional. (Legacy records
+        // are exactly the ones that fail this schema.)
         let schema = event_schema();
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -678,5 +681,7 @@ mod tests {
             .collect();
         assert!(required.contains(&"playbook_ref"));
         assert!(required.contains(&"kernel_ref"));
+        assert!(required.contains(&"seq"));
+        assert!(required.contains(&"prev"));
     }
 }

@@ -106,7 +106,9 @@ pub fn kernel_ref() -> String {
     s
 }
 
-pub use event::{Decision, Event, EventLog};
+pub use event::{
+    line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, CHAIN_GENESIS,
+};
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
 pub use hive::{first_write_conflict, validate_spawn, HiveViolation, SpawnRequest};
 pub use intake::{admit, AdmitError};

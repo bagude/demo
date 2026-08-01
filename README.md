@@ -392,7 +392,16 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   approval, or outstanding obligation is refused. This is what lets a Gate work
   across process death (cron, CI, a fresh container), not just in one session.
 - **Ledger** — an append-only event log whose envelope carries only references
-  and hashes, never raw payloads.
+  and hashes, never raw payloads. Append-only is a *property*, not a posture:
+  every record carries a contiguous `seq` and a `prev` digest of the previous
+  line's exact bytes, and `kernel ledger verify` proves the chain — mutation,
+  insertion, mid-deletion, and reordering are detected anywhere in history,
+  and a pre-chain legacy prefix is frozen the moment the first chained record
+  commits to it. The one stated limitation: tail truncation leaves a shorter
+  but internally consistent chain, so `verify` prints the chain **head** for
+  anchoring outside the file (a checkpoint, a push, a signed note). Racing
+  writers produce a visible fork the verifier reports, never a silently merged
+  history.
 
 The generated [`harness/README.md`](harness/README.md) states each law's
 enforcement level plainly — nothing claims a guarantee the kernel does not
@@ -491,8 +500,7 @@ replication multiplicity instead of the compiler refusing the ambiguity. Beyond 
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
-**transactional Hive budget** reservations; a **tamper-evident Ledger**
-(sequence + prev-hash chain); **symlink/canonical and case/Unicode-alias**
+**transactional Hive budget** reservations; **symlink/canonical and case/Unicode-alias**
 resolution for existing write targets; a real **IdP/signature** integration for
 approvals; a **Python/OpenAI-Agents** back-end behind the same `Binding`; and
 version-promotion tooling for approved Refinery proposals.

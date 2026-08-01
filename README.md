@@ -34,7 +34,7 @@ Work enters only as a typed task packet (**Intake**); a command does the work
 Gate)**); every governed decision is appended to an event log (**Ledger**). Its
 declaration is [`harness.patterns.yaml`](harness.patterns.yaml).
 
-All fourteen v1.2 patterns are bindable. Beyond the specimen, example specs
+Every v1.2 pattern is bindable. (The expression grammar exposes fifteen addressable kinds: the constitution's fourteen patterns plus **Critic**, which is formally the review-only *variant of Delegate* — bound via `critic: true` on a delegate — but stays separately addressable so a composition can place the reviewer distinctly from the workers.) Beyond the specimen, example specs
 exercise the scale patterns — [`examples/research-org.patterns.yaml`](examples/research-org.patterns.yaml)
 (`(Delegate × 3) -> Critic -> Refinery + Ledger + Hive + Port`) and
 [`examples/safe-deploy.patterns.yaml`](examples/safe-deploy.patterns.yaml)
@@ -45,7 +45,7 @@ a derived obligation binds to `Port[staging]` and leaves its sibling alone.
 
 ## Workspace
 
-Three crates, mirroring the compiler pipeline:
+Four crates, mirroring the compiler pipeline:
 
 | Crate | Role | Key contents |
 |-------|------|--------------|
@@ -105,8 +105,15 @@ Each of these is a compile **error**, verified by tests in
   (`Port[ghost]` matches no Port binding — the fail-open hole that would
   otherwise *suppress* the derived obligation), `composition.instance_kind_mismatch`
   (`Port[x]` where `x` is a Law id), `composition.unaddressable_pattern`
-  (`Sandbox[x]` — a singleton with no id to name), and `binding.duplicate_id`
-  (two bindings share an id, so no reference resolves to exactly one).
+  (`Sandbox[x]` — a singleton with no id to name), `binding.duplicate_id`
+  (two bindings share an id, so no reference resolves to exactly one), and
+  `binding.unaddressable_id` (an id like `github.production` falls outside the
+  grammar's `[A-Za-z0-9_-]+` alphabet — it would exist but be unnameable, so
+  reference integrity holds at the lexical boundary too).
+- **`composition.control_without_interceptor`** — a Verb composed `within` a
+  Law whose enclosing occurrences resolve to no **Guard**. An Obligation Law
+  records debt after the fact; it does not intercept the Verb, and "some Law
+  binding exists" is not an interceptor.
 - **`pipeline.stage_type_mismatch`** — a Pipeline whose typed stage interfaces
   don't chain (one stage's output ≠ the next's input). That, not a fixed order,
   is what makes it a Pipeline.
@@ -119,10 +126,12 @@ Each of these is a compile **error**, verified by tests in
   termination, merge, worker isolation, and a real worker contract.
 - **Composition case law (relation-aware, instance-addressed)** — obligations
   that exist only because two patterns meet *in a particular topology*. The
-  checker asks the composition AST direction-honest relational questions
-  (`is_within`, `flows_to`, `provisions`, `flow_connected`, `runs_under`,
-  `may_execute_concurrently`), not mere presence, so a Gate in one independent
-  branch and a Night Shift in another do **not** trip the rule. A Gate **running
+  rules run on the **resolved graph's typed edges** (`bindings_within`,
+  `bindings_enclosing`, `bindings_flow_connected`, `bindings_provisioned`,
+  `runs_under`), not on the syntax tree and not on mere presence — each rule
+  reads which *bindings* stand in the relation straight off the graph, so a
+  Gate in one independent branch and a Night Shift in another do **not** trip
+  the rule. A Gate **running
   under** a Night Shift ⇒ durable, revalidating suspension; a Port on the
   unattended data path ⇒ replay-safe idempotency; a Port **within** a Sandbox ⇒
   declared external isolation; a Gate **within** a Hive ⇒ declared approval
@@ -133,6 +142,50 @@ Each of these is a compile **error**, verified by tests in
   binds to the named component, not to every Port binding. A bare `Port`
   conservatively still stands for every Port binding. See
   [`examples/instance-addressed.patterns.yaml`](examples/instance-addressed.patterns.yaml).
+
+## The resolved graph: a valid reference is not yet an active node
+
+The expression is lowered into an explicit intermediate representation —
+`ResolvedGraph` — before anything is generated:
+
+```
+composition expression
+        ↓ parse
+AST
+        ↓ resolve (nodes, typed edges, ACTIVE binding set)
+ResolvedGraph
+        ↓
+case-law scoping + backend generation
+```
+
+Three properties the AST alone could not provide:
+
+- **Positions are preserved.** Every syntactic occurrence is its own node, so
+  `Port[github] within Sandbox + Port[github] -> Gate` is two architectural
+  positions sharing one binding — not collapsed into one identity.
+- **Activation is explicit.** A binding is part of the compiled system only if
+  the composition activates it: an anonymous `Port` activates every Port
+  binding; `Port[staging]` activates exactly that one. Activation then **closes
+  over the references bindings make to each other** (an active Hive activates
+  its worker Delegate; an active Delegate its granted Ports; an active Port its
+  write-guard Law; an active Gate its required obligation Laws) — these are the
+  binding-sourced `uses` edges the linear expression cannot express. **The
+  backends generate only active bindings**: a `production` Port bound beside
+  `Port[staging] within Sandbox` is not wired into the Playbook, and the
+  checker says so (`composition.binding_not_activated`) rather than excluding
+  it silently. Activation also scopes case law — a bound-but-unactivated
+  obligation Law no longer becomes a Gate requirement by mere co-presence in
+  the bindings block.
+- **The over-approximation is stated.** An operator between grouped operands
+  relates all pairs: `(A + B) -> (C + D)` declares all four data paths. That is
+  a deliberate conservative reading (more declared paths ⇒ more derived
+  obligations, never fewer), asserted by a test so it stays a stated choice.
+
+This round, activation gates the capability-bearing collections (Specialists,
+Delegates, Pipelines, Ports, Hives). The core enforcement artifacts (Laws,
+Gate, Ledger hooks) remain presence-based in generation: excluding *capability*
+is fail-safe, excluding *enforcement* would be fail-open, so the conservative
+default keeps enforcement artifacts until case law runs fully on the graph.
 
 ## Enforcement honesty
 
@@ -225,7 +278,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 120 tests: metamodel, checker rejections for every
+cargo test --workspace     # 132 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -235,40 +288,39 @@ cargo test --workspace     # 120 tests: metamodel, checker rejections for every
 
 ## Status and next steps
 
-Aligned to constitution **v1.2**, with **all fourteen patterns bindable** and a
-**relation-aware, instance-addressable** composition checker. Hardening from two
-external reviews is in: occurrences carry identity (`Port[staging]`), so a
-derived obligation attaches to the named component rather than the pattern
-category; the operator grammar has a **formal precedence** (`+` loosest) so a
-mixed expression parses one way; the direction-reversing `governs` relation was
-removed in favor of `flow_connected` / `runs_under`; obligations are scoped per
-run; every named occurrence is **reference-resolved** to exactly one binding
-(unknown/mismatched/unaddressable names and duplicate ids are rejected) so a typo
-cannot silently disconnect the topology from the system; file authority is
-decided on **platform-independent** normalized components (absolute, `..`,
-backslash, drive-letter and alternate-data-stream vectors all rejected);
-checkpoints are written with the POSIX atomic-replace sequence (temp → fsync →
-rename → dir-fsync, with the directory fsync on Unix) and hashed, injection-safe
-names, and the Ledger is fsynced; and approver identity distinguishes a *claimed*
-label from an authenticated principal.
+Aligned to constitution **v1.2**, with **every pattern bindable** and a
+**relation-aware, instance-addressable, reference-resolved** composition
+checker over a **resolved graph IR** with explicit activation. Hardening from
+three external reviews is in: occurrences carry identity (`Port[staging]`), so
+a derived obligation attaches to the named component rather than the pattern
+category; every named occurrence is **reference-resolved** to exactly one
+binding (unknown/mismatched/unaddressable names, out-of-grammar ids, and
+duplicate ids are rejected) so a typo cannot silently disconnect the topology
+from the system; **generation consumes the active set** — a binding the
+composition never activates produces no artifact, visibly; the operator grammar
+has a **formal precedence** (`+` loosest); the direction-reversing `governs`
+relation was removed in favor of `flow_connected` / `runs_under`; obligations
+are scoped per run; file authority is decided on **platform-independent**
+normalized components (absolute, `..`, backslash, drive-letter and
+alternate-data-stream vectors all rejected); checkpoints are written with the
+POSIX atomic-replace sequence (temp → fsync → rename → dir-fsync, with the
+directory fsync on Unix) and hashed, injection-safe names, and the Ledger is
+fsynced; and approver identity distinguishes a *claimed* label from an
+authenticated principal.
 
-Documented follow-ups (not yet done). The next foundational change is to lower
-the surface expression into an **explicit typed composition graph** —
-`expression → AST → resolve instances/bindings → typed graph → derive
-obligations` — so case law runs over a graph, not the syntax tree. That graph
-separates **node identity from binding identity** (two architectural positions
-may share one implementation: `staging_deployer` and `release_annotator` both
-backed by `Port: github`), makes the subtree-based relation semantics explicit
-(a grouped `(A + B) -> (C + D)` currently over-approximates to all four data
-paths), and adds **semantically-typed relations** sourced from bindings (a
-Delegate's declared Port list as an `invokes`/`uses` edge, not inferred from
-linear syntax). Beyond it: a **three-level identity** model (pattern kind →
-composition node → runtime instance) for per-worker Gate approval and
-worker-scoped obligations; a **declared obligation scope** (`run | task | branch
-| workspace | action`); a **unified transition protocol**
-(Proposed→Authorized→Executing→…→Recorded); **transactional Hive budget**
-reservations; a **tamper-evident Ledger** (sequence + prev-hash chain);
-**symlink/canonical and case/Unicode-alias** resolution for existing write
-targets; a real **IdP/signature** integration for approvals; a
-**Python/OpenAI-Agents** back-end behind the same `Binding`; and version-promotion
-tooling for approved Refinery proposals.
+Documented follow-ups (not yet done). The graph IR drives activation,
+generation, **and the relational case law** (rules read typed edges and their
+resolved binding ids; the AST keeps only parsing, presence, and reference
+resolution). The remaining step of that arc is surface syntax for **declared
+node identity** distinct from binding identity (today two positions sharing a
+binding are distinct nodes, but they cannot yet be *named* apart, e.g.
+`staging_deployer` vs `release_annotator` both backed by `Port: github`). Beyond it: a
+**three-level identity** model (pattern kind → composition node → runtime
+instance) for per-worker Gate approval and worker-scoped obligations; a
+**declared obligation scope** (`run | task | branch | workspace | action`); a
+**unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
+**transactional Hive budget** reservations; a **tamper-evident Ledger**
+(sequence + prev-hash chain); **symlink/canonical and case/Unicode-alias**
+resolution for existing write targets; a real **IdP/signature** integration for
+approvals; a **Python/OpenAI-Agents** back-end behind the same `Binding`; and
+version-promotion tooling for approved Refinery proposals.

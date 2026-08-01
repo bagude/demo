@@ -11,8 +11,9 @@
 //! occurrence standing for every Port binding; `Port[staging]` names one. The
 //! relational queries take a [`Sel`] so the checker can ask about a category
 //! (*is some Port within some Sandbox?*) or one component (*is `Port[staging]`
-//! within `Sandbox[worker]`?*), and the instance enumerators return the exact
-//! bindings a derived obligation should attach to.
+//! within `Sandbox[worker]`?*). Which *bindings* stand in a relation is
+//! answered by the lowered [`crate::graph::ResolvedGraph`], where positions
+//! carry resolved binding ids — composition case law runs there, not here.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -338,152 +339,6 @@ impl Expr {
                 b.collect_named(out);
             }
             Expr::Replicate(a, _) => a.collect_named(out),
-        }
-    }
-
-    /// The `inner`-kind occurrences that execute *within* some occurrence
-    /// matching `outer`. Mirrors [`Self::is_within`], but names the components.
-    pub fn instances_within<'a>(
-        &self,
-        inner: PatternKind,
-        outer: impl Into<Sel<'a>>,
-    ) -> Vec<&PatternInstance> {
-        let mut v = Vec::new();
-        self.collect_within_instances(inner, outer.into(), &mut v);
-        dedup(v)
-    }
-
-    fn collect_within_instances<'e>(
-        &'e self,
-        inner: PatternKind,
-        outer: Sel,
-        out: &mut Vec<&'e PatternInstance>,
-    ) {
-        match self {
-            Expr::Within(l, r) => {
-                if r.contains_sel(outer) {
-                    l.collect_kind(inner, out);
-                }
-                l.collect_within_instances(inner, outer, out);
-                r.collect_within_instances(inner, outer, out);
-            }
-            Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Provision(l, r) => {
-                l.collect_within_instances(inner, outer, out);
-                r.collect_within_instances(inner, outer, out);
-            }
-            Expr::Replicate(e, _) => e.collect_within_instances(inner, outer, out),
-            Expr::Pattern(_) => {}
-        }
-    }
-
-    /// The `outer`-kind occurrences that *enclose* some occurrence matching
-    /// `inner` (the containers, rather than the contained).
-    pub fn instances_enclosing<'a>(
-        &self,
-        inner: impl Into<Sel<'a>>,
-        outer: PatternKind,
-    ) -> Vec<&PatternInstance> {
-        let mut v = Vec::new();
-        self.collect_enclosing_instances(inner.into(), outer, &mut v);
-        dedup(v)
-    }
-
-    fn collect_enclosing_instances<'e>(
-        &'e self,
-        inner: Sel,
-        outer: PatternKind,
-        out: &mut Vec<&'e PatternInstance>,
-    ) {
-        match self {
-            Expr::Within(l, r) => {
-                if l.contains_sel(inner) {
-                    r.collect_kind(outer, out);
-                }
-                l.collect_enclosing_instances(inner, outer, out);
-                r.collect_enclosing_instances(inner, outer, out);
-            }
-            Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Provision(l, r) => {
-                l.collect_enclosing_instances(inner, outer, out);
-                r.collect_enclosing_instances(inner, outer, out);
-            }
-            Expr::Replicate(e, _) => e.collect_enclosing_instances(inner, outer, out),
-            Expr::Pattern(_) => {}
-        }
-    }
-
-    /// The `subject`-kind occurrences that sit on the same data path as some
-    /// occurrence matching `other` (either flow direction). Names the components
-    /// behind [`Self::flow_connected`].
-    pub fn instances_flow_connected<'a>(
-        &self,
-        subject: PatternKind,
-        other: impl Into<Sel<'a>>,
-    ) -> Vec<&PatternInstance> {
-        let mut v = Vec::new();
-        self.collect_flow_connected(subject, other.into(), &mut v);
-        dedup(v)
-    }
-
-    fn collect_flow_connected<'e>(
-        &'e self,
-        subject: PatternKind,
-        other: Sel,
-        out: &mut Vec<&'e PatternInstance>,
-    ) {
-        match self {
-            Expr::Seq(l, r) => {
-                // Everything in `l` flows into everything in `r`. A subject on
-                // either side of an `other` is flow-connected to it.
-                if r.contains_sel(other) {
-                    l.collect_kind(subject, out);
-                }
-                if l.contains_sel(other) {
-                    r.collect_kind(subject, out);
-                }
-                l.collect_flow_connected(subject, other, out);
-                r.collect_flow_connected(subject, other, out);
-            }
-            Expr::Coexist(l, r) | Expr::Provision(l, r) | Expr::Within(l, r) => {
-                l.collect_flow_connected(subject, other, out);
-                r.collect_flow_connected(subject, other, out);
-            }
-            Expr::Replicate(e, _) => e.collect_flow_connected(subject, other, out),
-            Expr::Pattern(_) => {}
-        }
-    }
-
-    /// The `provisioned`-kind occurrences that some occurrence matching
-    /// `provisioner` provisions (`provisioner => provisioned`).
-    pub fn instances_provisioned<'a>(
-        &self,
-        provisioner: impl Into<Sel<'a>>,
-        provisioned: PatternKind,
-    ) -> Vec<&PatternInstance> {
-        let mut v = Vec::new();
-        self.collect_provisioned(provisioner.into(), provisioned, &mut v);
-        dedup(v)
-    }
-
-    fn collect_provisioned<'e>(
-        &'e self,
-        provisioner: Sel,
-        provisioned: PatternKind,
-        out: &mut Vec<&'e PatternInstance>,
-    ) {
-        match self {
-            Expr::Provision(l, r) => {
-                if l.contains_sel(provisioner) {
-                    r.collect_kind(provisioned, out);
-                }
-                l.collect_provisioned(provisioner, provisioned, out);
-                r.collect_provisioned(provisioner, provisioned, out);
-            }
-            Expr::Coexist(l, r) | Expr::Seq(l, r) | Expr::Within(l, r) => {
-                l.collect_provisioned(provisioner, provisioned, out);
-                r.collect_provisioned(provisioner, provisioned, out);
-            }
-            Expr::Replicate(e, _) => e.collect_provisioned(provisioner, provisioned, out),
-            Expr::Pattern(_) => {}
         }
     }
 }
@@ -858,44 +713,5 @@ mod tests {
         assert!(!e.is_within(Sel::the(PatternKind::Port, "metrics"), PatternKind::Sandbox));
         // Kind-level query still sees *some* Port within the Sandbox.
         assert!(e.is_within(PatternKind::Port, PatternKind::Sandbox));
-    }
-
-    #[test]
-    fn instances_within_names_only_the_enclosed_component() {
-        let e = parse("Port[staging] within Sandbox + Port[metrics]").unwrap();
-        let inside = e.instances_within(PatternKind::Port, PatternKind::Sandbox);
-        assert_eq!(inside.len(), 1);
-        assert_eq!(inside[0].id.as_deref(), Some("staging"));
-    }
-
-    #[test]
-    fn instances_enclosing_names_the_container() {
-        let e = parse("(Gate within Hive[research]) + Hive[deploy] + Delegate").unwrap();
-        let enclosing = e.instances_enclosing(PatternKind::Gate, PatternKind::Hive);
-        assert_eq!(enclosing.len(), 1);
-        assert_eq!(enclosing[0].id.as_deref(), Some("research"));
-    }
-
-    #[test]
-    fn instances_flow_connected_and_provisioned_name_components() {
-        let e = parse("Port[a] -> NightShift + Port[b]").unwrap();
-        let on_path = e.instances_flow_connected(PatternKind::Port, PatternKind::NightShift);
-        assert_eq!(on_path.len(), 1);
-        assert_eq!(on_path[0].id.as_deref(), Some("a"));
-
-        let p = parse("NightShift => Port[worker]").unwrap();
-        let made = p.instances_provisioned(PatternKind::NightShift, PatternKind::Port);
-        assert_eq!(made.len(), 1);
-        assert_eq!(made[0].id.as_deref(), Some("worker"));
-    }
-
-    #[test]
-    fn anonymous_occurrence_still_stands_for_every_binding() {
-        // A bare `Port` names no specific instance; the enumerator returns the
-        // anonymous occurrence, which the checker reads as "all Port bindings".
-        let e = parse("Port within Sandbox").unwrap();
-        let inside = e.instances_within(PatternKind::Port, PatternKind::Sandbox);
-        assert_eq!(inside.len(), 1);
-        assert!(inside[0].id.is_none());
     }
 }

@@ -128,10 +128,24 @@ spec governed and which kernel ran.
 ./target/debug/harnessc verify
 ```
 
-`harnessc verify` compiles in memory and compares every expected file against
-the tree on disk, naming what is missing or differs. A workspace test runs it
-against this repository's own Playbook, so a stale artifact fails CI instead of
-shipping.
+`harnessc verify` compiles in memory and proves the tree on disk is **exactly**
+this bundle — not merely that every expected file matches. Each backend's final
+artifact is a **bundle manifest** (path, content digest, mode, and file type
+per generated file, sorted), which makes the managed path set durable. Verify
+checks four things per file — presence, bytes, regular-file type (a symlink in
+an artifact's place fails), and mode (a hook whose executable bit was stripped
+silently stops running, so identical bytes are not enough) — and, via the
+previous manifest, flags **obsolete** files: paths an older compiler emitted
+that this one no longer generates, which would otherwise remain live behavior
+no current Playbook accounts for. A workspace test runs it against this
+repository's own Playbook, so a stale artifact fails CI instead of shipping.
+
+`harnessc build` promotes the bundle without ever presenting a torn Playbook:
+the complete bundle is staged as fsynced tmp siblings first (the live tree
+untouched), then promoted by atomic renames; obsolete files are retired before
+the manifest is replaced, and the manifest is promoted **last** as the commit
+point. A crash mid-promotion leaves the old manifest describing the old set, so
+`verify` reports the exact divergence rather than trusting either version.
 
 ## What the compiler rejects (the interesting part)
 

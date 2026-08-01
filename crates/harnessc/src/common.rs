@@ -301,6 +301,70 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// File name of the bundle manifest — the exact inventory every backend appends
+/// as the **final** file of its generated set. Backends choose the directory
+/// (`harness/` for claude-code, the bundle root for portable); the name is
+/// shared so the driver can locate the previous build's manifest for obsolete-
+/// file detection without knowing the backend's layout.
+pub const BUNDLE_MANIFEST_FILENAME: &str = "bundle.manifest.json";
+
+/// The mode a generated file is promoted with, and the mode `verify` holds it
+/// to. Shell hooks are executable; everything else is not. A hook whose bytes
+/// match but whose executable bit was stripped is a *behavioral* change — the
+/// hook silently stops running — so mode is part of the bundle's identity, not
+/// a filesystem detail.
+pub fn file_mode(path: &str) -> &'static str {
+    if path.ends_with(".sh") {
+        "0755"
+    } else {
+        "0644"
+    }
+}
+
+/// Build the bundle manifest over every file generated **before** it: path,
+/// content digest, mode, and file type, sorted by path.
+///
+/// Byte comparison of the expected set proves each present file is right; it
+/// cannot prove nothing else is left over. A file an *older* compiler emitted
+/// and the current one no longer does — a stale hook, a retired command —
+/// passes a files-I-expect scan untouched, while still being live behavior in
+/// the harness. The manifest closes that hole: it is the durable record of the
+/// managed path set, so `build` can delete what fell out of the set and
+/// `verify` can flag it. The manifest cannot list its own digest; it is
+/// instead compared byte-for-byte like any other generated file.
+pub fn bundle_manifest(prov: &Prov, path: &str, files: &[GenFile]) -> GenFile {
+    let mut entries: Vec<&GenFile> = files.iter().collect();
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    let files_json: Vec<Value> = entries
+        .iter()
+        .map(|f| {
+            json!({
+                "path": f.path,
+                "digest": sha256_hex(f.content.as_bytes()),
+                "mode": file_mode(&f.path),
+                "type": "regular",
+            })
+        })
+        .collect();
+    prov.json_file(path, json!({ "files": files_json }))
+}
+
+/// The managed path set recorded by a previous build's manifest on disk, or
+/// `None` when no (parseable) manifest exists — e.g. the first build into a
+/// directory. Tolerant parsing is deliberate: a corrupt manifest must not
+/// brick `build`, and `verify` catches the corruption as a byte mismatch.
+pub fn read_manifest_paths(manifest_path: &std::path::Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(manifest_path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    Some(
+        v.get("files")?
+            .as_array()?
+            .iter()
+            .filter_map(|f| f.get("path")?.as_str().map(String::from))
+            .collect(),
+    )
+}
+
 /// The pattern kinds of the compiled architecture with their enforcement
 /// levels, derived from the **resolved graph** rather than from surface
 /// presence: a Law activated only through a `uses` edge or `always_on` is part

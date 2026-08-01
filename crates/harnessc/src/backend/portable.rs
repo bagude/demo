@@ -53,6 +53,11 @@ impl Backend for Portable {
             files.push(prov.gitkeep(&dir));
         }
         files.push(readme(&prov, refs));
+        // Always last: the manifest inventories every file above it (path,
+        // digest, mode, type), and `build` promotes it as the commit point.
+        let manifest =
+            crate::common::bundle_manifest(&prov, crate::common::BUNDLE_MANIFEST_FILENAME, &files);
+        files.push(manifest);
 
         Generated { files }
     }
@@ -246,6 +251,9 @@ fn protected_file(prov: &Prov) -> GenFile {
         "hooks/",
         "schemas/",
         "harness.manifest.json",
+        // The bundle inventory: tampering it would hide an obsolete artifact
+        // from verification, so it is protected like the hooks themselves.
+        "bundle.manifest.json",
     ] {
         body.push_str(p);
         body.push('\n');

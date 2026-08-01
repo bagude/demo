@@ -77,6 +77,14 @@ impl Backend for ClaudeCode {
             files.push(prov.gitkeep(&dir));
         }
         files.push(harness_readme(&prov, refs));
+        // Always last: the manifest inventories every file above it (path,
+        // digest, mode, type), and `build` promotes it as the commit point.
+        let manifest = common::bundle_manifest(
+            &prov,
+            &format!("harness/{}", common::BUNDLE_MANIFEST_FILENAME),
+            &files,
+        );
+        files.push(manifest);
 
         Generated { files }
     }

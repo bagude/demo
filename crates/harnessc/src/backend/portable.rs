@@ -124,34 +124,43 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
         })
     });
 
+    // The manifest declares the compiled architecture, so it lists only the
+    // bindings the composition *activates* — same active set as generation.
+    use spec::PatternKind;
+    let g = &compiled.graph;
     let delegates: Vec<Value> = spec
         .bindings
         .delegates
         .iter()
+        .filter(|dg| g.is_active(PatternKind::Delegate, &dg.id))
         .map(|dg| json!({ "id": dg.id, "tools": dg.tools, "ports": dg.ports, "critic": dg.critic, "contract": dg.contract_schema }))
         .collect();
     let pipelines: Vec<Value> = spec
         .bindings
         .pipelines
         .iter()
+        .filter(|p| g.is_active(PatternKind::Pipeline, &p.id))
         .map(|p| json!({ "id": p.id, "stages": p.stages.iter().map(|s| &s.name).collect::<Vec<_>>() }))
         .collect();
     let ports: Vec<Value> = spec
         .bindings
         .ports
         .iter()
+        .filter(|p| g.is_active(PatternKind::Port, &p.id))
         .map(|p| json!({ "id": p.id, "server": p.server, "observe": p.observe, "write": p.write, "write_guard": p.write_guard, "idempotent": p.idempotent }))
         .collect();
     let hives: Vec<Value> = spec
         .bindings
         .hives
         .iter()
+        .filter(|h| g.is_active(PatternKind::Hive, &h.id))
         .map(|h| json!({ "id": h.id, "worker": h.worker, "budget": h.budget, "max_depth": h.max_depth, "fan_out": format!("{:?}", h.fan_out).to_lowercase() }))
         .collect();
     let specialists: Vec<Value> = spec
         .bindings
         .specialists
         .iter()
+        .filter(|s| g.is_active(PatternKind::Specialist, &s.id))
         .map(|s| json!({ "id": s.id, "skill": s.skill }))
         .collect();
 

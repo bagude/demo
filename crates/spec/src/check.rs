@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 
 use crate::binding::Binding;
 use crate::compose::Expr;
+use crate::graph::ResolvedGraph;
 use crate::model::{Bindings, LawEvent, LawKind, PatternInstance, PatternKind, SpecFile};
 
 /// Which concrete bindings a composition relation refers to.
@@ -116,9 +117,14 @@ const NON_PRECONDITION_BINDINGS: &[&str] = &["action_hash", "approver", "expiry"
 /// binding's capabilities. Returns all diagnostics; the caller treats any
 /// `Error` as blocking.
 pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnostic> {
+    // Lower the expression into the resolved graph first: activation (which
+    // bindings the composition makes part of the architecture) scopes the
+    // coverage warnings and the composition case law below.
+    let graph = ResolvedGraph::resolve(expr, &spec.bindings);
     let mut d = Vec::new();
     check_cross_reference(spec, expr, &mut d);
     check_instance_references(spec, expr, &mut d);
+    check_active_coverage(spec, expr, &graph, &mut d);
     check_gate(spec, &mut d);
     check_laws(spec, binding, &mut d);
     check_ledger(spec, &mut d);
@@ -127,7 +133,7 @@ pub fn check(spec: &SpecFile, expr: &Expr, binding: &dyn Binding) -> Vec<Diagnos
     check_ports(spec, &mut d);
     check_hives(spec, &mut d);
     check_specialists(spec, &mut d);
-    check_composition(spec, expr, binding, &mut d);
+    check_composition(spec, expr, &graph, binding, &mut d);
     d
 }
 
@@ -226,13 +232,28 @@ fn other_kind_with_id(b: &Bindings, exclude: PatternKind, id: &str) -> Option<Pa
 /// a misspelled component name suppresses the very obligation instance
 /// addressing exists to enforce. This runs before composition case law so that
 /// hole is a hard error, not a silent no-op.
+/// The lexical contract on addressable binding ids: exactly what the
+/// composition tokenizer can read back as an instance id. A binding whose id
+/// falls outside this alphabet (e.g. `github.production`) would exist but be
+/// unaddressable — reference integrity must hold at the lexical boundary, not
+/// only after parsing.
+fn id_is_addressable(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) {
     let b = &spec.bindings;
 
     // Duplicate binding ids make *every* id reference ambiguous (a Port's
     // write_guard, a Hive's worker, a named occurrence), not just addressing.
+    // Ids outside the composition grammar's alphabet are rejected for the
+    // mirror-image reason: such a binding could never be named at all.
     for (kind, label) in [
         (PatternKind::Law, "law"),
+        (PatternKind::Gate, "gate"),
         (PatternKind::Specialist, "specialist"),
         (PatternKind::Delegate, "delegate"),
         (PatternKind::Pipeline, "pipeline"),
@@ -245,6 +266,15 @@ fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnosti
         let mut seen = BTreeSet::new();
         let mut reported = BTreeSet::new();
         for id in ids {
+            if !id_is_addressable(id) {
+                d.push(Diagnostic::error(
+                    "binding.unaddressable_id",
+                    format!(
+                        "{label} id '{id}' cannot be addressed by the composition grammar; ids \
+                         must be non-empty and match [A-Za-z0-9_-]+"
+                    ),
+                ));
+            }
             if !seen.insert(id) && reported.insert(id) {
                 d.push(Diagnostic::error(
                     "binding.duplicate_id",
@@ -286,6 +316,48 @@ fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnosti
                 )),
             },
             Some(_) => {}
+        }
+    }
+}
+
+/// Activation coverage: a binding the composition never activates is not part
+/// of the compiled architecture. When a kind is addressed *only* by named
+/// occurrences, its unnamed siblings are inactive — the backends exclude them
+/// from generation, and this warning says so, per binding, so the exclusion is
+/// visible rather than silent. (A kind that is absent from the expression
+/// entirely already gets the kind-level `bound_but_unreferenced` warning.)
+fn check_active_coverage(
+    spec: &SpecFile,
+    expr: &Expr,
+    graph: &ResolvedGraph,
+    d: &mut Vec<Diagnostic>,
+) {
+    let b = &spec.bindings;
+    for (kind, label) in [
+        (PatternKind::Law, "law"),
+        (PatternKind::Specialist, "specialist"),
+        (PatternKind::Delegate, "delegate"),
+        (PatternKind::Pipeline, "pipeline"),
+        (PatternKind::Port, "port"),
+        (PatternKind::Hive, "hive"),
+    ] {
+        if !expr.contains(kind) {
+            continue; // kind-level warning already covers this
+        }
+        let Some(ids) = addressable_ids(b, kind) else {
+            continue;
+        };
+        for id in ids {
+            if !graph.is_active(kind, id) {
+                d.push(Diagnostic::warning(
+                    "composition.binding_not_activated",
+                    format!(
+                        "{label} '{id}' is bound, but no occurrence in the composition (nor any \
+                         active binding's reference) activates it; it is excluded from the \
+                         generated Playbook"
+                    ),
+                ));
+            }
         }
     }
 }
@@ -572,31 +644,44 @@ fn check_hives(spec: &SpecFile, d: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mut Vec<Diagnostic>) {
+fn check_composition(
+    spec: &SpecFile,
+    expr: &Expr,
+    graph: &ResolvedGraph,
+    binding: &dyn Binding,
+    d: &mut Vec<Diagnostic>,
+) {
     let b = &spec.bindings;
 
     // Obligation Law + Gate ⇒ the obligation must be discharged *through* the
     // Gate, not merely recorded. If the binding's kernel can discharge an
     // obligation, the Gate must list it in requires_obligations; otherwise the
     // "every edit is followed by the test suite" promise is never enforced.
+    // Scoped to *active* components: an obligation Law the composition never
+    // activates is not part of this architecture, so it must not become a Gate
+    // requirement by mere co-presence in the bindings block.
     if let Some(gate) = &b.gate {
-        for law in &b.laws {
-            let is_obligation = matches!(law.kind, LawKind::Obligation);
-            let dischargeable = binding
-                .dischargeable_obligations()
-                .contains(&law.id.as_str());
-            if is_obligation
-                && dischargeable
-                && !gate.requires_obligations.iter().any(|o| o == &law.id)
-            {
-                d.push(Diagnostic::error(
-                    "composition.obligation_not_discharged",
-                    format!(
-                        "obligation law '{}' is recorded but never discharged; gate '{}' must list \
-                         it in requires_obligations so progress halts until it is satisfied",
-                        law.id, gate.id
-                    ),
-                ));
+        if graph.is_active(PatternKind::Gate, &gate.id) {
+            for law in &b.laws {
+                let active = graph.is_active(PatternKind::Law, &law.id);
+                let is_obligation = matches!(law.kind, LawKind::Obligation);
+                let dischargeable = binding
+                    .dischargeable_obligations()
+                    .contains(&law.id.as_str());
+                if active
+                    && is_obligation
+                    && dischargeable
+                    && !gate.requires_obligations.iter().any(|o| o == &law.id)
+                {
+                    d.push(Diagnostic::error(
+                        "composition.obligation_not_discharged",
+                        format!(
+                            "obligation law '{}' is recorded but never discharged; gate '{}' must list \
+                             it in requires_obligations so progress halts until it is satisfied",
+                            law.id, gate.id
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -639,16 +724,24 @@ fn check_composition(spec: &SpecFile, expr: &Expr, binding: &dyn Binding, d: &mu
         }
     }
 
-    // A Verb placed `within` a control context must have real interceptors:
-    // at least one Law present in the outer context.
-    for (inner, outer) in expr.within_relations() {
-        if inner.contains(&PatternKind::Verb)
-            && outer.contains(&PatternKind::Law)
-            && b.laws.is_empty()
-        {
+    // A Verb placed `within` a control context must have a real interceptor:
+    // among the Law occurrences that enclose the Verb, at least one must
+    // resolve to a **Guard** (a pre-execution control point). An Obligation Law
+    // records debt after the fact — `Verb within Law[validate-after-edit]`
+    // where that law is an obligation contains no interceptor at all, and the
+    // old "some Law binding exists" test could not see the difference.
+    let enclosing_laws = expr.instances_enclosing(PatternKind::Verb, PatternKind::Law);
+    if !enclosing_laws.is_empty() {
+        let refers = Refers::from(&enclosing_laws);
+        let has_guard = b
+            .laws
+            .iter()
+            .any(|l| refers.includes(&l.id) && matches!(l.kind, LawKind::Guard));
+        if !has_guard {
             d.push(Diagnostic::error(
                 "composition.control_without_interceptor",
-                "a Verb is composed 'within' a Law but no laws are bound to intercept it",
+                "a Verb is composed 'within' a Law, but no enclosing Law resolves to a Guard; \
+                 an Obligation records debt after the fact — it does not intercept the Verb",
             ));
         }
     }
@@ -1030,6 +1123,100 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(codes(&check_yaml(yaml)).contains(&"composition.sandbox_port_isolation"));
+    }
+
+    #[test]
+    fn inactive_obligation_law_is_not_forced_into_the_gate() {
+        // The reviewer's case: an obligation law that is bound but never
+        // activated by the composition must not become a Gate requirement by
+        // mere co-presence in the bindings block. `Law[enforce-file-scope]`
+        // names only the guard, so `require-validation` stays inactive.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Intake -> Verb within (Law[enforce-file-scope] + Gate) + Ledger"
+bindings:
+  intake: { task_schema: s.json, storage: tasks/ }
+  verb: { name: v, command: c.md, accepts: A, produces: B }
+  laws:
+    - { id: enforce-file-scope, kind: guard, event: pre_tool, applies_to: [edit] }
+    - { id: require-validation, kind: obligation, event: post_tool, applies_to: [edit] }
+  gate:
+    id: g
+    boundary: before_commit
+    checkpoint_schema: s.json
+    bind: [action_hash, repository_revision, approver]
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let diags = check_yaml(yaml);
+        let c = codes(&diags);
+        assert!(
+            !c.contains(&"composition.obligation_not_discharged"),
+            "an inactive obligation law must not become a gate requirement: {diags:?}"
+        );
+        // The exclusion is visible, not silent.
+        assert!(c.contains(&"composition.binding_not_activated"));
+    }
+
+    #[test]
+    fn active_obligation_law_still_requires_gate_discharge() {
+        // Anonymous `Law` activates every law binding — the original rule holds.
+        let yaml = SPECIMEN.replace("    requires_obligations: [require-validation]\n", "");
+        assert!(codes(&check_yaml(&yaml)).contains(&"composition.obligation_not_discharged"));
+    }
+
+    #[test]
+    fn verb_within_an_obligation_only_law_has_no_interceptor() {
+        // The reviewer's case: the enclosing Law is an Obligation — it records
+        // debt after the fact, it does not intercept the Verb.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Verb within Law[validate-after-edit]"
+bindings:
+  verb: { name: v, command: c.md, accepts: A, produces: B }
+  laws:
+    - { id: validate-after-edit, kind: obligation, event: post_tool, applies_to: [edit] }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.control_without_interceptor"));
+    }
+
+    #[test]
+    fn verb_within_a_guard_law_has_its_interceptor() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Verb within Law[enforce-file-scope]"
+bindings:
+  verb: { name: v, command: c.md, accepts: A, produces: B }
+  laws:
+    - { id: enforce-file-scope, kind: guard, event: pre_tool, applies_to: [edit] }
+platform: { type: claude-code }
+"#;
+        assert!(!codes(&check_yaml(yaml)).contains(&"composition.control_without_interceptor"));
+    }
+
+    #[test]
+    fn binding_id_outside_the_grammar_is_rejected() {
+        // `github.production` exists but could never be written as
+        // `Port[github.production]` — reference integrity at the lexical boundary.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port"
+bindings:
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: github.production, server: gh, write: [x], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"binding.unaddressable_id"));
     }
 
     #[test]

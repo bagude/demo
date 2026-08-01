@@ -13,19 +13,23 @@
 pub mod binding;
 pub mod check;
 pub mod compose;
+pub mod graph;
 pub mod model;
 
 pub use binding::{default_enforcement_level, Binding, EnforcementLevel};
 pub use check::{check, Diagnostic, Severity};
 pub use compose::{Expr, Sel};
+pub use graph::ResolvedGraph;
 pub use model::{PatternInstance, PatternKind, SpecFile};
 
 /// A successfully compiled specification: the typed model, its parsed
-/// composition tree, and any non-fatal warnings.
+/// composition tree, the resolved composition graph (with the active binding
+/// set generation consumes), and any non-fatal warnings.
 #[derive(Debug, Clone)]
 pub struct CompiledSpec {
     pub spec: SpecFile,
     pub composition: Expr,
+    pub graph: ResolvedGraph,
     pub warnings: Vec<Diagnostic>,
 }
 
@@ -99,9 +103,11 @@ pub fn compile(yaml: &str, binding: &dyn Binding) -> Result<CompiledSpec, Compil
         .into_iter()
         .filter(|d| d.severity == Severity::Warning)
         .collect();
+    let graph = ResolvedGraph::resolve(&composition, &spec.bindings);
     Ok(CompiledSpec {
         spec,
         composition,
+        graph,
         warnings,
     })
 }

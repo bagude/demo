@@ -71,7 +71,7 @@ impl Backend for ClaudeCode {
         if let Some(gate) = &spec.bindings.gate {
             files.push(gate_file(&prov, gate));
         }
-        files.extend(pattern_files(&prov, spec));
+        files.extend(pattern_files(&prov, compiled));
         files.push(playbook_manifest(&prov, compiled));
         for dir in runtime_dirs(spec) {
             files.push(prov.gitkeep(&dir));
@@ -310,26 +310,56 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
 }
 
 /// Generate the Claude Code artifacts for the scale/interaction patterns.
-fn pattern_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
-    let b = &spec.bindings;
+///
+/// Generation consumes the resolved graph's **active set**, not the raw
+/// bindings block: a binding the composition never activates is not an
+/// architectural node and produces no artifact. A `production` Port bound
+/// beside `Port[staging] within Sandbox` is therefore *not* wired into the
+/// Playbook — connectivity the architecture does not declare is not emitted.
+fn pattern_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
+    use spec::PatternKind;
+    let b = &compiled.spec.bindings;
+    let g = &compiled.graph;
     let mut out = Vec::new();
 
-    for s in &b.specialists {
+    for s in b
+        .specialists
+        .iter()
+        .filter(|s| g.is_active(PatternKind::Specialist, &s.id))
+    {
         out.push(specialist_skill(prov, s));
     }
-    for dg in &b.delegates {
+    for dg in b
+        .delegates
+        .iter()
+        .filter(|dg| g.is_active(PatternKind::Delegate, &dg.id))
+    {
         out.push(delegate_agent(prov, dg));
         out.push(prov.json_file(&dg.contract_schema, delegate_contract_schema(dg)));
     }
-    for p in &b.pipelines {
+    for p in b
+        .pipelines
+        .iter()
+        .filter(|p| g.is_active(PatternKind::Pipeline, &p.id))
+    {
         out.push(pipeline_command(prov, p));
     }
-    for h in &b.hives {
+    for h in b
+        .hives
+        .iter()
+        .filter(|h| g.is_active(PatternKind::Hive, &h.id))
+    {
         out.push(hive_orchestrator(prov, h));
     }
-    if !b.ports.is_empty() {
-        out.push(mcp_config(prov, &b.ports));
-        out.push(ports_manifest(prov, &b.ports));
+    let active_ports: Vec<_> = b
+        .ports
+        .iter()
+        .filter(|p| g.is_active(PatternKind::Port, &p.id))
+        .cloned()
+        .collect();
+    if !active_ports.is_empty() {
+        out.push(mcp_config(prov, &active_ports));
+        out.push(ports_manifest(prov, &active_ports));
     }
     out
 }
@@ -609,6 +639,46 @@ mod tests {
         for path in ["CLAUDE.md", ".claude/settings.json", "harness/README.md"] {
             let _ = find(&g, path);
         }
+    }
+
+    #[test]
+    fn inactive_bindings_are_not_generated() {
+        // Activation semantics: the composition names only Port[staging], so
+        // the bound-but-unactivated `production` Port must not be wired into
+        // the Playbook — a valid reference is an *active architectural node*,
+        // and only active nodes generate artifacts.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "(Port[staging] within Sandbox) -> Gate + Law + Ledger"
+bindings:
+  sandbox: { workspace: branch, lineage: [source_revision, sandbox_id, merge_revision] }
+  laws:
+    - { id: enforce-file-scope, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: deploy, write: [release], write_guard: enforce-file-scope, sandboxed: propose }
+    - { id: production, server: deploy-prod, write: [release], write_guard: enforce-file-scope, sandboxed: propose }
+  gate:
+    id: g
+    boundary: before_deploy
+    checkpoint_schema: harness/schemas/checkpoint.schema.json
+    bind: [action_hash, repository_revision, approver]
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let compiled = spec::compile(yaml, &ClaudeCode).expect("compiles");
+        let g = ClaudeCode.generate(&compiled, "sha256:test");
+        let ports = &find(&g, "harness/ports.json").content;
+        assert!(ports.contains("staging"), "active port is generated");
+        assert!(
+            !ports.contains("production"),
+            "inactive port must not be wired into the Playbook: {ports}"
+        );
+        let mcp = &find(&g, ".mcp.json").content;
+        assert!(!mcp.contains("deploy-prod"), "inactive port server absent");
     }
 
     #[test]

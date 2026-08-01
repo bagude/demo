@@ -167,6 +167,83 @@ pub fn verify_bytes(public: &str, bytes: &[u8], signature: &str) -> Result<(), S
         .map_err(|_| SignError::Verification)
 }
 
+/// Why re-proving a stored signature-authenticated approval failed.
+#[derive(Debug)]
+pub enum ReverifyError {
+    /// The checkpoint carries no approval at all.
+    NotApproved,
+    /// The approval is not signature-authenticated — there is no signature to
+    /// re-prove. Callers enforcing a signature policy refuse on this.
+    NotSignatureAuthenticated,
+    /// The approval claims signature auth but carries no signature evidence.
+    NoEvidence,
+    /// The approver could not be resolved through the current registry
+    /// (unknown, revoked, or the registry document itself was refused).
+    Identity(crate::identity::IdentityError),
+    /// The stored signature does not verify over the checkpoint's current
+    /// contents.
+    Signature(SignError),
+}
+
+impl fmt::Display for ReverifyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReverifyError::NotApproved => write!(f, "no approval recorded for this checkpoint"),
+            ReverifyError::NotSignatureAuthenticated => {
+                write!(f, "approval is not signature-authenticated")
+            }
+            ReverifyError::NoEvidence => write!(
+                f,
+                "signature-authenticated approval carries no signature evidence"
+            ),
+            ReverifyError::Identity(e) => write!(f, "{e}"),
+            ReverifyError::Signature(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ReverifyError {}
+
+/// Re-prove a stored signature-authenticated approval from the checkpoint's
+/// **current** contents. The canonical message is rebuilt from what the file
+/// says *now* — action, precondition snapshot, anchored ledger head, instance,
+/// expiry — so a rewrite of any covered field invalidates the signature no
+/// matter what the file claims. The approver's key is resolved through the
+/// **current** registry (with a pinned `authority`, a verified, unexpired,
+/// non-rolled-back signed document), so a principal revoked since approval is
+/// refused — which is exactly what revocation means.
+///
+/// This is the single canonical composition of that check: `gate verify` and
+/// the Refinery's promotion both call it, so the two resume paths cannot
+/// drift apart.
+pub fn reverify_signed_approval(
+    cp: &Checkpoint,
+    trusted_keys: &Path,
+    authority: Option<&str>,
+    now: &str,
+) -> Result<(), ReverifyError> {
+    let approval = cp.approval.as_ref().ok_or(ReverifyError::NotApproved)?;
+    if !matches!(approval.approver.auth, crate::gate::AuthMethod::Signature) {
+        return Err(ReverifyError::NotSignatureAuthenticated);
+    }
+    let evidence = approval
+        .approver
+        .evidence
+        .as_ref()
+        .ok_or(ReverifyError::NoEvidence)?;
+    let authority = authority
+        .map(crate::identity::resolve_authority)
+        .transpose()
+        .map_err(ReverifyError::Identity)?;
+    let registry = crate::identity::Registry::load(trusted_keys, authority.as_deref(), now)
+        .map_err(ReverifyError::Identity)?;
+    let public = registry
+        .key_for(&approval.approver.principal)
+        .map_err(ReverifyError::Identity)?;
+    let message = approval_message(cp, &approval.preconditions, approval.expiry.as_deref());
+    verify(public, &message, evidence).map_err(ReverifyError::Signature)
+}
+
 /// Look up a principal's public key in the trusted-keys registry — a TOML file
 /// with an `[approvers]` table mapping principal to `ed25519:<hex>`:
 ///

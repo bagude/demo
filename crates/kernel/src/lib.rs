@@ -126,7 +126,9 @@ pub use intake::{admit, AdmitError};
 pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};
 pub use ledger::Ledger;
 pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
-pub use sign::{approval_message, trusted_key_for, Keypair, SignError};
+pub use sign::{
+    approval_message, reverify_signed_approval, trusted_key_for, Keypair, ReverifyError, SignError,
+};
 pub use validate::{validate, Report, Violation};
 
 #[cfg(test)]

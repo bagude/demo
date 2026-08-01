@@ -68,17 +68,24 @@ impl From<std::io::Error> for SignError {
 /// The canonical, versioned serialization of what an approver approves. The
 /// signature covers the *world-state binding*, not a bare "yes": the action
 /// hash (substitution), the precondition snapshot (TOCTOU), the anchored
-/// ledger head (history custody), and the expiry (validity stretching).
+/// ledger head (history custody), the runtime instance (a per-worker approval
+/// is that worker's alone), and the expiry (validity stretching).
 /// Preconditions are a `BTreeMap`, so their order is canonical by
-/// construction.
+/// construction. v2 added the `instance` line; v1 signatures do not verify
+/// against v2 messages — deliberately, since the binding they attested to
+/// said nothing about instances.
 pub fn approval_message(
     cp: &Checkpoint,
     preconditions: &Preconditions,
     expiry: Option<&str>,
 ) -> String {
-    let mut msg = String::from("harness-approval-v1\n");
+    let mut msg = String::from("harness-approval-v2\n");
     msg.push_str(&format!("gate: {}\n", cp.gate_id));
     msg.push_str(&format!("run: {}\n", cp.run_id));
+    msg.push_str(&format!(
+        "instance: {}\n",
+        cp.instance.as_deref().unwrap_or("-")
+    ));
     msg.push_str(&format!("action: {}\n", cp.action_hash));
     for (k, v) in preconditions {
         msg.push_str(&format!("precondition: {k}={v}\n"));
@@ -227,6 +234,7 @@ mod tests {
             "2026-08-01T00:00:00Z",
         )
         .anchoring_ledger_head(Some("sha256:head".into()))
+        .for_instance(Some("run-1/deployer/1".into()))
     }
 
     #[test]
@@ -260,9 +268,10 @@ mod tests {
         let cp = checkpoint();
         let msg = approval_message(&cp, &cp.preconditions.clone(), Some("2026-09-01T00:00:00Z"));
         for needle in [
-            "harness-approval-v1",
+            "harness-approval-v2",
             "gate: approve-commit",
             "run: run-1",
+            "instance: run-1/deployer/1",
             "action: sha256:action",
             "precondition: repository_revision=abc123",
             "ledger_head: sha256:head",

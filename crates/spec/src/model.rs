@@ -113,6 +113,10 @@ pub enum ObligationScope {
     Branch,
     Workspace,
     Action,
+    /// Per runtime instance: debt keyed to the specific occupant of a
+    /// composition position (`run-42/worker/2`) that opened it — the
+    /// worker-scoped obligation the three-level identity model exists for.
+    Instance,
 }
 
 impl ObligationScope {
@@ -123,6 +127,7 @@ impl ObligationScope {
             ObligationScope::Branch => "branch",
             ObligationScope::Workspace => "workspace",
             ObligationScope::Action => "action",
+            ObligationScope::Instance => "instance",
         }
     }
 }

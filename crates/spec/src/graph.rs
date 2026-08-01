@@ -279,6 +279,20 @@ impl ComponentKey {
     }
 }
 
+/// A runtime-addressable position: the compile-time anchor a runtime instance
+/// path names, with the multiplicity bound its replica slots must respect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressablePosition {
+    /// The position's unique name (its alias, or its uniquely-owned
+    /// instance id).
+    pub name: String,
+    pub node: NodeId,
+    pub kind: PatternKind,
+    /// How many runtime instances this position stands for; a valid instance
+    /// slot is `1..=multiplicity`.
+    pub multiplicity: u32,
+}
+
 /// A bound component with its activation status and provenance.
 #[derive(Debug, Clone)]
 pub struct ResolvedComponent {
@@ -551,6 +565,55 @@ impl ResolvedGraph {
         self.nodes
             .iter()
             .find(|n| n.alias.as_deref() == Some(alias))
+    }
+
+    /// The **runtime-addressable** positions: the compile-time anchors a
+    /// runtime instance path (`<run>/<position>/<slot>`) may name. A position
+    /// is addressable when it has a unique name — its alias always (aliases
+    /// are checked unique), or its instance id when exactly one position
+    /// carries that id and no alias shadows it. Two positions sharing one
+    /// instance id (`Port[staging] … + Port[staging] …`) are individually
+    /// unnameable, exactly as they are in relations: naming positions apart is
+    /// what aliases are for.
+    ///
+    /// This is the bridge the compiled `positions.json` registry serializes,
+    /// and what lets the kernel refuse a runtime instance of a position the
+    /// architecture never declared — or a replica slot beyond the declared
+    /// multiplicity.
+    pub fn addressable_positions(&self) -> Vec<AddressablePosition> {
+        use std::collections::BTreeMap;
+        let aliases: BTreeSet<&str> = self
+            .nodes
+            .iter()
+            .filter_map(|n| n.alias.as_deref())
+            .collect();
+        let mut id_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for n in &self.nodes {
+            if let Some(id) = n.instance.as_deref() {
+                *id_counts.entry(id).or_default() += 1;
+            }
+        }
+        let mut out = Vec::new();
+        for n in &self.nodes {
+            let name = match (&n.alias, &n.instance) {
+                (Some(alias), _) => Some(alias.clone()),
+                (None, Some(id))
+                    if id_counts[id.as_str()] == 1 && !aliases.contains(id.as_str()) =>
+                {
+                    Some(id.clone())
+                }
+                _ => None,
+            };
+            if let Some(name) = name {
+                out.push(AddressablePosition {
+                    name,
+                    node: n.id,
+                    kind: n.kind,
+                    multiplicity: n.multiplicity.count(),
+                });
+            }
+        }
+        out
     }
 
     /// Alias-addressed relation, position on the `from` side: does the position
@@ -1371,6 +1434,58 @@ platform: { type: claude-code }
             .filter(|e| e.relation == Relation::FlowsTo)
             .count();
         assert_eq!(flows, 4, "(A + B) -> (C + D) declares four data paths");
+    }
+
+    #[test]
+    fn addressable_positions_are_the_uniquely_nameable_ones() {
+        // An alias always names its position; a bare instance id names one
+        // only when exactly one position carries it.
+        let g = ResolvedGraph::resolve(
+            &parse("Port[staging as deployer] within Sandbox + Port[production]").unwrap(),
+            &bindings(TWO_PORTS),
+        );
+        let addr = g.addressable_positions();
+        let names: Vec<&str> = addr.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"deployer"), "alias is addressable");
+        assert!(
+            names.contains(&"production"),
+            "a uniquely-owned instance id is addressable"
+        );
+        assert!(
+            !names.contains(&"staging"),
+            "the aliased node's name is its alias, not its binding id"
+        );
+
+        // Two positions sharing one instance id are individually unnameable —
+        // exactly as in relations, naming apart is what aliases are for.
+        let g = ResolvedGraph::resolve(
+            &parse("Port[staging] within Sandbox + Port[staging] -> Gate").unwrap(),
+            &bindings(TWO_PORTS),
+        );
+        assert!(
+            g.addressable_positions().is_empty(),
+            "a shared id names no position"
+        );
+    }
+
+    #[test]
+    fn addressable_positions_carry_the_multiplicity_bound() {
+        let g = ResolvedGraph::resolve(
+            &parse("(Delegate[worker as w] × 3) -> Gate").unwrap(),
+            &bindings(
+                r#"
+harness: { name: n, version: 0.1.0 }
+composition: { expression: "unused" }
+bindings:
+  delegates:
+    - { id: worker, agent: a.md, contract_schema: s.json, tools: [Read] }
+platform: { type: claude-code }
+"#,
+            ),
+        );
+        let addr = g.addressable_positions();
+        let w = addr.iter().find(|p| p.name == "w").expect("w addressable");
+        assert_eq!(w.multiplicity, 3, "replica slots are bounded by the IR");
     }
 
     #[test]

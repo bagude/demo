@@ -108,6 +108,12 @@ pub struct Checkpoint {
     /// the Gate can refuse a log whose history no longer contains it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger_head: Option<String>,
+    /// The runtime instance this checkpoint gates
+    /// (`<run>/<position>/<slot>`), when the Gate is per-instance. Approval
+    /// binds to it — approving worker 2's action never resumes worker 3 —
+    /// and resume must present the matching instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     /// Present once a decision has been recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalBinding>,
@@ -187,6 +193,7 @@ impl Checkpoint {
             created_at: created_at.into(),
             requires_obligations: Vec::new(),
             ledger_head: None,
+            instance: None,
             approval: None,
         }
     }
@@ -202,6 +209,13 @@ impl Checkpoint {
     /// rewritten — is refused (see `EventLog::verify_anchor`).
     pub fn anchoring_ledger_head(mut self, head: Option<String>) -> Self {
         self.ledger_head = head;
+        self
+    }
+
+    /// Bind this checkpoint to one runtime instance: the approval is that
+    /// instance's, and resume must present the matching instance.
+    pub fn for_instance(mut self, instance: Option<String>) -> Self {
+        self.instance = instance;
         self
     }
 
@@ -294,17 +308,26 @@ impl GateStore {
         GateStore { dir: dir.into() }
     }
 
-    fn checkpoint_path(&self, gate_id: &str, action_hash: &str) -> PathBuf {
-        // Derive the filename from a hash of the identifiers rather than
-        // interpolating them: a gate_id or action_hash containing '/' or '..'
-        // must never be able to escape the checkpoint directory. The
-        // human-readable values live inside the JSON body. NUL-separated so
-        // ("a", "bc") and ("ab", "c") cannot collide.
+    fn checkpoint_path(&self, checkpoint: &Checkpoint) -> PathBuf {
+        // Derive the filename from a hash of the FULL checkpoint identity —
+        // gate, run, action, and instance — rather than interpolating: values
+        // containing '/' or '..' must never escape the checkpoint directory,
+        // and two distinct checkpoints must never share a file. Before the
+        // instance joined the identity, two per-instance checkpoints of the
+        // same gated action silently overwrote each other — worker 2's
+        // checkpoint replacing worker 1's. The human-readable values live in
+        // the JSON body. NUL-separated so segment boundaries cannot collide.
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
-        h.update(gate_id.as_bytes());
-        h.update([0u8]);
-        h.update(action_hash.as_bytes());
+        for part in [
+            checkpoint.gate_id.as_str(),
+            checkpoint.run_id.as_str(),
+            checkpoint.action_hash.as_str(),
+            checkpoint.instance.as_deref().unwrap_or(""),
+        ] {
+            h.update(part.as_bytes());
+            h.update([0u8]);
+        }
         let digest = h.finalize();
         let mut name = String::with_capacity(64);
         for b in digest {
@@ -316,7 +339,7 @@ impl GateStore {
     /// Persist a checkpoint durably and atomically (pretty JSON for human
     /// inspection). A crash mid-save can never leave a truncated checkpoint.
     pub fn save(&self, checkpoint: &Checkpoint) -> io::Result<PathBuf> {
-        let path = self.checkpoint_path(&checkpoint.gate_id, &checkpoint.action_hash);
+        let path = self.checkpoint_path(checkpoint);
         let json = serde_json::to_string_pretty(checkpoint)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         crate::fsutil::atomic_write(&path, json.as_bytes())?;
@@ -433,6 +456,28 @@ mod tests {
         assert!(matches!(err, GateError::ObligationOutstanding { .. }));
         // Discharged (nothing outstanding): allowed.
         assert!(cp.check_obligations(&[]).is_ok());
+    }
+
+    #[test]
+    fn distinct_checkpoint_identities_never_share_a_file() {
+        // The regression that surfaced during instance-identity work: two
+        // per-instance checkpoints of the same gated action overwrote each
+        // other. Gate, run, action, AND instance are all filename identity.
+        let dir = tempfile::tempdir().unwrap();
+        let store = GateStore::at(dir.path());
+        let base = checkpoint();
+        let w1 = base.clone().for_instance(Some("run-1/worker/1".into()));
+        let w2 = base.clone().for_instance(Some("run-1/worker/2".into()));
+        let p1 = store.save(&w1).unwrap();
+        let p2 = store.save(&w2).unwrap();
+        assert_ne!(p1, p2, "per-instance checkpoints are distinct files");
+        assert_eq!(GateStore::load(&p1).unwrap().instance, w1.instance);
+        assert_eq!(GateStore::load(&p2).unwrap().instance, w2.instance);
+
+        // Different runs of the same gated action are distinct too.
+        let mut other_run = base.clone();
+        other_run.run_id = "run-2".into();
+        assert_ne!(store.save(&base).unwrap(), store.save(&other_run).unwrap());
     }
 
     #[test]

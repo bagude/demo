@@ -84,6 +84,10 @@ enum Command {
         /// packet's content digest.
         #[arg(long)]
         packet: Option<PathBuf>,
+        /// The runtime instance (<run>/<position>/<slot>) — required for
+        /// instance scope: the debt is that occupant's.
+        #[arg(long)]
+        instance: Option<String>,
         /// The Playbook (spec) content digest governing this run.
         #[arg(long)]
         playbook_ref: Option<String>,
@@ -131,6 +135,9 @@ enum Command {
         /// edited path owes its own discharge.
         #[arg(long)]
         path: Option<String>,
+        /// The runtime instance discharging — required for instance scope.
+        #[arg(long)]
+        instance: Option<String>,
         /// Shell command whose success is the evidence of discharge (e.g.
         /// "cargo test"). If it fails, nothing is discharged.
         #[arg(long)]
@@ -244,6 +251,16 @@ enum GateCmd {
         /// history no longer contains the anchored head (tail truncation).
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// The runtime instance this checkpoint gates
+        /// (<run>/<position>/<slot>): the approval is that instance's alone,
+        /// and resume must present the matching instance.
+        #[arg(long)]
+        instance: Option<String>,
+        /// The compiled positions registry (positions.json). When given with
+        /// --instance, the instance must name a declared position within its
+        /// multiplicity bound — the IR's replication cardinality, enforced.
+        #[arg(long)]
+        positions: Option<PathBuf>,
     },
     /// Sign a checkpoint's canonical approval message (gate, run, action,
     /// preconditions, anchored ledger head, expiry) with an approver's private
@@ -319,6 +336,11 @@ enum GateCmd {
         /// revocation means.
         #[arg(long)]
         authority: Option<String>,
+        /// The runtime instance presenting for resume. Required — and required
+        /// to match — when the checkpoint is instance-bound: worker 2's
+        /// approval never resumes worker 3.
+        #[arg(long)]
+        instance: Option<String>,
     },
 }
 
@@ -488,13 +510,15 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             obligation,
             scope,
             packet,
+            instance,
             playbook_ref,
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
             let path = extract_target_path(&stdin);
             // The event carries the key its declared scope reads at eval time.
-            let (task_id, scope_refs) = scope_recording(&scope, packet.as_deref())?;
+            let (task_id, scope_refs) =
+                scope_recording(&scope, packet.as_deref(), instance.as_deref())?;
             let mut input_refs: Vec<String> =
                 path.map(|p| format!("path:{p}")).into_iter().collect();
             input_refs.extend(scope_refs);
@@ -536,6 +560,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 run_id: run_id.clone(),
                 task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
                 branch: current_branch(),
+                // A commit gate is not an instance; open instance debt blocks
+                // it fail-safe.
+                instance: None,
             };
             let outstanding = kernel::obligation::outstanding(&events, &require, &ctx);
             let allowed = outstanding.is_empty();
@@ -583,6 +610,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             scope,
             packet,
             path,
+            instance,
             check,
             playbook_ref,
         } => {
@@ -604,7 +632,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
             // The discharge must carry the same key the open events did, or
             // it clears nothing.
-            let (task_id, scope_refs) = scope_recording(&scope, packet.as_deref())?;
+            let (task_id, scope_refs) =
+                scope_recording(&scope, packet.as_deref(), instance.as_deref())?;
             let mut input_refs: Vec<String> =
                 path.map(|p| format!("path:{p}")).into_iter().collect();
             input_refs.extend(scope_refs);
@@ -1108,12 +1137,28 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             require_obligations,
             checkpoints,
             ledger,
+            instance,
+            positions,
         } => {
             let action_hash = match (action_hash, action_file) {
                 (Some(h), _) => h,
                 (None, Some(file)) => hash_file(&file)?,
                 (None, None) => return Err("provide --action-hash or --action-file".into()),
             };
+            // An instance-bound checkpoint names a REAL occupant: form-checked
+            // always, and held to the compiled positions registry when one is
+            // given — an instance of an undeclared position, or a replica slot
+            // beyond the declared multiplicity, is refused here.
+            if let Some(instance) = &instance {
+                let parsed = kernel::instance::InstanceId::parse(instance)?;
+                if let Some(positions) = &positions {
+                    let registry = kernel::instance::PositionRegistry::load(positions)?;
+                    if let Err(e) = registry.validate(&parsed) {
+                        eprintln!("gate refused: {e}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                }
+            }
             // Anchor the Ledger's chain head into the durable checkpoint —
             // the out-of-band pin that makes tail truncation detectable at
             // resume. A chain that is already broken is refused outright: a
@@ -1138,7 +1183,8 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 now_rfc3339(),
             )
             .requiring_obligations(require_obligations)
-            .anchoring_ledger_head(ledger_head);
+            .anchoring_ledger_head(ledger_head)
+            .for_instance(instance);
             let path = GateStore::at(&checkpoints).save(&checkpoint)?;
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
@@ -1233,6 +1279,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             packet,
             trusted_keys,
             authority,
+            instance,
         } => {
             let cp = GateStore::load(&checkpoint)?;
             let preconds = parse_preconditions(&preconditions)?;
@@ -1240,6 +1287,35 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             if let Err(e) = cp.revalidate(&action_hash, &preconds, &now_rfc3339()) {
                 eprintln!("approval invalid: {e}");
                 return Ok(ExitCode::FAILURE);
+            }
+
+            // An instance-bound checkpoint resumes only for ITS instance:
+            // worker 2's approval never resumes worker 3, and a caller
+            // claiming an instance against an unbound checkpoint is refused
+            // rather than silently granted a narrower approval than exists.
+            match (&cp.instance, &instance) {
+                (Some(bound), Some(presenting)) if bound != presenting => {
+                    eprintln!(
+                        "gate refused: checkpoint is bound to instance '{bound}', but \
+                         '{presenting}' is presenting for resume"
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+                (Some(bound), None) => {
+                    eprintln!(
+                        "gate refused: checkpoint is bound to instance '{bound}'; pass \
+                         --instance to resume as it"
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+                (None, Some(presenting)) => {
+                    eprintln!(
+                        "gate refused: checkpoint is not instance-bound, but '{presenting}' \
+                         claims to resume as an instance"
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+                _ => {}
             }
 
             // The Gate also refuses to resume while a required obligation is
@@ -1255,6 +1331,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     run_id: cp.run_id.clone(),
                     task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
                     branch: current_branch(),
+                    instance: cp.instance.clone(),
                 };
                 let outstanding =
                     kernel::obligation::outstanding(&events, &cp.requires_obligations, &ctx);
@@ -1355,6 +1432,7 @@ fn current_branch() -> Option<String> {
 fn scope_recording(
     scope: &str,
     packet: Option<&std::path::Path>,
+    instance: Option<&str>,
 ) -> Result<(Option<String>, Vec<String>), Box<dyn std::error::Error>> {
     let scope = kernel::obligation::Scope::parse(scope)
         .ok_or_else(|| format!("unknown obligation scope '{scope}'"))?;
@@ -1374,6 +1452,14 @@ fn scope_recording(
                     .into_iter()
                     .collect(),
             ))
+        }
+        kernel::obligation::Scope::Instance => {
+            let instance = instance
+                .ok_or("instance-scoped obligations need --instance <run>/<position>/<slot>")?;
+            // Form-checked here; membership and multiplicity are enforced
+            // where instances gate execution (see `gate request --positions`).
+            let parsed = kernel::instance::InstanceId::parse(instance)?;
+            Ok((None, vec![format!("instance:{parsed}")]))
         }
         _ => Ok((None, vec![])),
     }

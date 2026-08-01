@@ -132,6 +132,10 @@ enum Command {
     /// Approver key operations for signature-authenticated approvals.
     #[command(subcommand)]
     Key(KeyCmd),
+    /// Identity-registry operations: sign and verify the approver registry as
+    /// an authority-issued identity document.
+    #[command(subcommand)]
+    Registry(RegistryCmd),
     /// Append one event to the Ledger.
     Event {
         #[arg(long)]
@@ -231,6 +235,12 @@ enum GateCmd {
         /// public key. Required when --auth signature.
         #[arg(long)]
         trusted_keys: Option<PathBuf>,
+        /// Pinned authority public key (`ed25519:<hex>` or a file containing
+        /// one). When given, the registry must be an authority-signed,
+        /// unexpired, non-rolled-back identity document; without it the
+        /// registry is plain host configuration.
+        #[arg(long)]
+        authority: Option<String>,
     },
     /// Revalidate a checkpoint's approval against the current world, including
     /// any required obligations. Exits 0 if the approval still holds, 1 if it
@@ -251,6 +261,12 @@ enum GateCmd {
         /// rewritten checkpoint fails no matter what the file claims.
         #[arg(long)]
         trusted_keys: Option<PathBuf>,
+        /// Pinned authority public key (`ed25519:<hex>` or a file containing
+        /// one). The approver is resolved through the CURRENT registry, so a
+        /// principal revoked since approval stops resuming — which is what
+        /// revocation means.
+        #[arg(long)]
+        authority: Option<String>,
     },
 }
 
@@ -264,6 +280,31 @@ enum LedgerCmd {
     Verify {
         #[arg(long)]
         ledger: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegistryCmd {
+    /// Sign the registry with the authority's private key: a detached
+    /// signature over the file's exact bytes, written to `<registry>.sig`.
+    /// Edit one byte afterwards and verification fails — no canonicalization,
+    /// no ambiguity.
+    Sign {
+        #[arg(long)]
+        registry: PathBuf,
+        /// The authority's private seed file (from `kernel key generate`).
+        #[arg(long)]
+        key: PathBuf,
+    },
+    /// Verify a signed registry against the pinned authority key: signature,
+    /// validity window, and rollback watermark. Prints the document summary.
+    Verify {
+        #[arg(long)]
+        registry: PathBuf,
+        /// The authority public key: a literal `ed25519:<hex>` or a path to a
+        /// file containing one.
+        #[arg(long)]
+        authority: String,
     },
 }
 
@@ -500,6 +541,58 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Gate(cmd) => gate(cmd),
+        Command::Registry(cmd) => match cmd {
+            RegistryCmd::Sign { registry, key } => {
+                let bytes = std::fs::read(&registry)?;
+                // Warn at signing time about what a pinned-authority load will
+                // refuse — the issuer should find out now, not at the Gate.
+                if let Ok(v) = String::from_utf8_lossy(&bytes).parse::<toml::Value>() {
+                    let meta = v.get("registry");
+                    if meta.and_then(|r| r.get("serial")).is_none()
+                        || meta.and_then(|r| r.get("expires_at")).is_none()
+                    {
+                        eprintln!(
+                            "warning: registry lacks [registry] serial and/or expires_at; a \
+                             pinned-authority load will refuse it"
+                        );
+                    }
+                }
+                let seed = std::fs::read_to_string(&key)?;
+                let kp = kernel::sign::Keypair::from_seed_str(seed.trim())?;
+                let sig_path = kernel::identity::signature_path(&registry);
+                std::fs::write(&sig_path, format!("{}\n", kp.sign_bytes(&bytes)))?;
+                println!("signed {} -> {}", registry.display(), sig_path.display());
+                println!("authority public key: {}", kp.public_string());
+                Ok(ExitCode::SUCCESS)
+            }
+            RegistryCmd::Verify {
+                registry,
+                authority,
+            } => {
+                let authority = kernel::identity::resolve_authority(&authority)?;
+                match kernel::identity::Registry::load(&registry, Some(&authority), &now_rfc3339())
+                {
+                    Ok(reg) => {
+                        println!(
+                            "registry ok: issuer {}, serial {}, expires {}, {} approver(s), {} \
+                             revoked",
+                            reg.issuer.as_deref().unwrap_or("-"),
+                            reg.serial
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            reg.expires_at.as_deref().unwrap_or("-"),
+                            reg.approver_count(),
+                            reg.revoked_count(),
+                        );
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    Err(e) => {
+                        eprintln!("registry refused: {e}");
+                        Ok(ExitCode::FAILURE)
+                    }
+                }
+            }
+        },
         Command::Key(KeyCmd::Generate { out }) => {
             let kp = kernel::sign::Keypair::generate()?;
             if let Some(parent) = out.parent() {
@@ -793,6 +886,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             expiry,
             signature,
             trusted_keys,
+            authority,
         } => {
             let mut cp = GateStore::load(&checkpoint)?;
             // Signature auth is VERIFIED before anything is recorded: an
@@ -808,7 +902,13 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         "--auth signature takes --signature; the signature IS the evidence".into(),
                     );
                 }
-                let public = kernel::sign::trusted_key_for(trusted_keys, &approver)?;
+                let public = match approver_key(trusted_keys, authority.as_deref(), &approver) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        eprintln!("approval NOT recorded: {e}");
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
                 let message =
                     kernel::sign::approval_message(&cp, &cp.preconditions, expiry.as_deref());
                 if let Err(e) = kernel::sign::verify(&public, &message, &signature) {
@@ -854,6 +954,7 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             preconditions,
             ledger,
             trusted_keys,
+            authority,
         } => {
             let cp = GateStore::load(&checkpoint)?;
             let preconds = parse_preconditions(&preconditions)?;
@@ -918,8 +1019,20 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         );
                         return Ok(ExitCode::FAILURE);
                     };
-                    let public =
-                        kernel::sign::trusted_key_for(trusted_keys, &approval.approver.principal)?;
+                    // The approver is resolved through the CURRENT registry:
+                    // a principal revoked since approval is refused here,
+                    // which is exactly what revocation means.
+                    let public = match approver_key(
+                        trusted_keys,
+                        authority.as_deref(),
+                        &approval.approver.principal,
+                    ) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            eprintln!("gate refused: {e}");
+                            return Ok(ExitCode::FAILURE);
+                        }
+                    };
                     let message = kernel::sign::approval_message(
                         &cp,
                         &approval.preconditions,
@@ -936,6 +1049,23 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// Resolve an approver's public key through the identity registry. With a
+/// pinned authority, the registry must be a verified, unexpired,
+/// non-rolled-back signed document; without one it is plain host
+/// configuration (revocations are honored either way).
+fn approver_key(
+    trusted_keys: &std::path::Path,
+    authority: Option<&str>,
+    principal: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let authority = authority
+        .map(kernel::identity::resolve_authority)
+        .transpose()?;
+    let registry =
+        kernel::identity::Registry::load(trusted_keys, authority.as_deref(), &now_rfc3339())?;
+    Ok(registry.key_for(principal)?.to_string())
 }
 
 /// Load a packet from a `.json` file (JSON) or anything else (TOML).

@@ -251,7 +251,7 @@ fn an_unverifiable_signature_is_never_recorded() {
         trusted.to_str().unwrap(),
     ]);
     assert!(!ok);
-    assert!(stderr.contains("no trusted key"), "{stderr}");
+    assert!(stderr.contains("no key registered"), "{stderr}");
 }
 
 #[test]

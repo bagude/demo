@@ -131,12 +131,23 @@ impl Keypair {
 
     /// Sign a canonical message; the signature is evidence, not a secret.
     pub fn sign(&self, message: &str) -> String {
-        encode(&self.signing.sign(message.as_bytes()).to_bytes())
+        self.sign_bytes(message.as_bytes())
+    }
+
+    /// Sign raw bytes — e.g. an identity registry's exact file contents, so a
+    /// detached signature needs no canonicalization at all.
+    pub fn sign_bytes(&self, bytes: &[u8]) -> String {
+        encode(&self.signing.sign(bytes).to_bytes())
     }
 }
 
 /// Verify `signature` over `message` against a serialized public key.
 pub fn verify(public: &str, message: &str, signature: &str) -> Result<(), SignError> {
+    verify_bytes(public, message.as_bytes(), signature)
+}
+
+/// Verify `signature` over raw bytes against a serialized public key.
+pub fn verify_bytes(public: &str, bytes: &[u8], signature: &str) -> Result<(), SignError> {
     let key_bytes = decode(public, 32)?;
     let mut key = [0u8; 32];
     key.copy_from_slice(&key_bytes);
@@ -145,7 +156,7 @@ pub fn verify(public: &str, message: &str, signature: &str) -> Result<(), SignEr
     let sig_bytes = decode(signature, 64)?;
     let mut sig = [0u8; 64];
     sig.copy_from_slice(&sig_bytes);
-    key.verify(message.as_bytes(), &Signature::from_bytes(&sig))
+    key.verify(bytes, &Signature::from_bytes(&sig))
         .map_err(|_| SignError::Verification)
 }
 

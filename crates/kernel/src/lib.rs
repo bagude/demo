@@ -41,6 +41,7 @@ pub mod event;
 pub mod fsutil;
 pub mod gate;
 pub mod hive;
+pub mod identity;
 pub mod intake;
 pub mod law;
 pub mod ledger;
@@ -61,6 +62,7 @@ const KERNEL_SOURCE: &[&str] = &[
     include_str!("event.rs"),
     include_str!("law.rs"),
     include_str!("gate.rs"),
+    include_str!("identity.rs"),
     include_str!("obligation.rs"),
     include_str!("packet.rs"),
     include_str!("sign.rs"),
@@ -113,6 +115,7 @@ pub use event::{
 };
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
 pub use hive::{first_write_conflict, validate_spawn, HiveViolation, SpawnRequest};
+pub use identity::{resolve_authority, IdentityError, Registry};
 pub use intake::{admit, AdmitError};
 pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};
 pub use ledger::Ledger;

@@ -499,6 +499,22 @@ valid chain that file-level checks accept — but the approver signed the head
 they actually saw, so the rewrite invalidates the approval. Forging a
 resumable approval now requires the approver's private key, not write access.
 
+The trusted-keys registry itself is bindable to an **identity authority** —
+the offline trust core of an IdP integration. `kernel registry sign` turns the
+registry into an authority-issued identity document (`[registry]` issuer +
+monotonic serial + `expires_at`, `[approvers]`, `[revoked]`) with a detached
+Ed25519 signature over the file's exact bytes; with `--authority <pinned key>`
+on `gate approve`/`gate verify`, the kernel refuses an unsigned, edited,
+expired, or rolled-back registry wholesale, and resolves the approver through
+the **current** document — so a principal revoked in a later serial stops
+resuming checkpoints they validly approved, which is exactly what revocation
+means. Custody moves again: from registry-file custody to authority-key
+custody. Stated plainly: the rollback high-water mark is same-disk state, so
+the hard bound on replaying an old signed document is its `expires_at` —
+issuers must roll documents; and binding the *authority* to an online IdP
+(OIDC issuance, directory sync) is a protocol adapter deliberately not faked
+here.
+
 Documented follow-ups (not yet done). The graph IR drives activation,
 generation, **and the relational case law**; binding dependencies are
 **represented as typed `uses` edges**; one IR instance is checked, carried,
@@ -530,8 +546,9 @@ instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
 **transactional Hive budget** reservations; **symlink/canonical and case/Unicode-alias**
-resolution for existing write targets; a real **IdP** integration binding
-approver keys to organizational identity (the signature layer exists; key
-distribution and revocation remain host configuration); a
+resolution for existing write targets; an **online IdP protocol adapter**
+(OIDC issuance, directory sync) binding the identity authority itself to
+organizational infrastructure — the offline trust core (authority-signed
+registries with expiry and revocation) exists; a
 **Python/OpenAI-Agents** back-end behind the same `Binding`; and
 version-promotion tooling for approved Refinery proposals.

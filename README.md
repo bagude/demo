@@ -99,7 +99,7 @@ guarantee. So the identity chain has four links:
 
 ```
 source_ref   = sha256(spec bytes)
-compiler_ref = sha256(compiler + front-end implementation source + IR schema + target)
+compiler_ref = sha256(compiler + front-end source + Cargo.lock + toolchain + IR schema + target)
 ir_ref       = sha256(canonical serialized resolved IR)
 playbook_ref = sha256(source_ref + compiler_ref + target + ir_ref)
 ```
@@ -107,7 +107,12 @@ playbook_ref = sha256(source_ref + compiler_ref + target + ir_ref)
 `compiler_ref` hashes the compiler's *implementation source*, not its version
 labels: two divergent trees that both still call themselves `0.1.0` — the exact
 state in which a checked-in Playbook once kept claiming a retracted guarantee —
-produce different references, so the divergence is detectable.
+produce different references, so the divergence is detectable. The digest also
+folds in the workspace `Cargo.lock` and the toolchain identity (`rustc
+--version --verbose`: release, commit, host triple, captured at build time), so
+identical source built against different dependency versions or a different
+rustc is a different compiler too. `kernel_ref` binds the same way: source,
+lock, and toolchain — the build gap closed on both sides of the chain.
 
 Every artifact records `source_ref` and `playbook_ref` in its header; the JSON
 manifests additionally expose `compiler_ref` and `ir_ref` (the shell and Markdown
@@ -140,12 +145,21 @@ that this one no longer generates, which would otherwise remain live behavior
 no current Playbook accounts for. A workspace test runs it against this
 repository's own Playbook, so a stale artifact fails CI instead of shipping.
 
-`harnessc build` promotes the bundle without ever presenting a torn Playbook:
-the complete bundle is staged as fsynced tmp siblings first (the live tree
-untouched), then promoted by atomic renames; obsolete files are retired before
-the manifest is replaced, and the manifest is promoted **last** as the commit
-point. A crash mid-promotion leaves the old manifest describing the old set, so
-`verify` reports the exact divergence rather than trusting either version.
+`harnessc build` promotes the bundle without ever presenting a torn Playbook,
+in two layers. First, the **versioned copy**: the complete bundle is
+materialized under `.harnessc/bundles/<playbook-ref>/`, fsynced, and
+self-verified there (bytes, modes, types) before the live tree is touched — so
+there is always a whole, coherent Playbook on disk, and `.harnessc/current`
+keeps naming the old version until the new one has fully landed. Then the
+**live tree**: files staged as fsynced tmp siblings, promoted by atomic
+renames; obsolete files retired before the manifest is replaced; the manifest
+promoted last; and finally `current` atomically switched to the new bundle as
+the bundle-level commit point. The previously-current version is retained as
+the rollback source (older ones are pruned), and `verify` cross-checks the
+pointer when present — a crash mid-promotion leaves the old manifest and old
+pointer describing the old set, so `verify` reports the exact divergence
+rather than trusting either version. `.harnessc/` is local build state, not
+checked in.
 
 ## What the compiler rejects (the interesting part)
 
@@ -387,7 +401,16 @@ The generated hooks are thin shims; the enforcement lives in the compiled
   approval, or outstanding obligation is refused. This is what lets a Gate work
   across process death (cron, CI, a fresh container), not just in one session.
 - **Ledger** — an append-only event log whose envelope carries only references
-  and hashes, never raw payloads.
+  and hashes, never raw payloads. Append-only is a *property*, not a posture:
+  every record carries a contiguous `seq` and a `prev` digest of the previous
+  line's exact bytes, and `kernel ledger verify` proves the chain — mutation,
+  insertion, mid-deletion, and reordering are detected anywhere in history,
+  and a pre-chain legacy prefix is frozen the moment the first chained record
+  commits to it. The one stated limitation: tail truncation leaves a shorter
+  but internally consistent chain, so `verify` prints the chain **head** for
+  anchoring outside the file (a checkpoint, a push, a signed note). Racing
+  writers produce a visible fork the verifier reports, never a silently merged
+  history.
 
 The generated [`harness/README.md`](harness/README.md) states each law's
 enforcement level plainly — nothing claims a guarantee the kernel does not
@@ -486,8 +509,7 @@ replication multiplicity instead of the compiler refusing the ambiguity. Beyond 
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a
 **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded);
-**transactional Hive budget** reservations; a **tamper-evident Ledger**
-(sequence + prev-hash chain); **symlink/canonical and case/Unicode-alias**
+**transactional Hive budget** reservations; **symlink/canonical and case/Unicode-alias**
 resolution for existing write targets; a real **IdP/signature** integration for
 approvals; a **Python/OpenAI-Agents** back-end behind the same `Binding`; and
 version-promotion tooling for approved Refinery proposals.

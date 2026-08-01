@@ -52,8 +52,9 @@ pub mod validate;
 /// these bytes yields a content-addressed identity for the enforcement binary
 /// itself — one that changes whenever the enforcement logic changes, even if no
 /// version number is bumped. This is deliberately the *source* rather than the
-/// built executable: it is deterministic across toolchains, so two builds of the
-/// same source agree, while two different source trees never collide.
+/// built executable: the digest is reproducible for the same source, lock, and
+/// toolchain without requiring bit-reproducible builds, while two different
+/// source trees never collide.
 const KERNEL_SOURCE: &[&str] = &[
     include_str!("lib.rs"),
     include_str!("event.rs"),
@@ -71,15 +72,31 @@ const KERNEL_SOURCE: &[&str] = &[
     include_str!("bin/intake.rs"),
 ];
 
+/// The workspace dependency lock, embedded at compile time. Enforcement
+/// behavior is a function of dependencies too (the JSON parser, the TOML
+/// parser, the hash implementation), so the lock is part of the kernel's
+/// identity.
+const KERNEL_LOCKFILE: &str = include_str!("../../../Cargo.lock");
+
+/// The toolchain that built this kernel (`rustc --version --verbose`),
+/// captured by `build.rs`. The same source compiled by a different rustc is a
+/// different enforcement binary.
+const KERNEL_TOOLCHAIN: &str = env!("KERNEL_RUSTC_VERSION");
+
 /// Content digest of the kernel implementation that is executing — the runtime
-/// identity stamped into every governed [`Event`]. Length-prefixed per source
-/// unit so no rearrangement of file boundaries can produce a collision.
+/// identity stamped into every governed [`Event`]: implementation source,
+/// dependency lock, and toolchain. Length-prefixed per unit so no
+/// rearrangement of boundaries can produce a collision.
 pub fn kernel_ref() -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    for src in KERNEL_SOURCE {
-        hasher.update((src.len() as u64).to_le_bytes());
-        hasher.update(src.as_bytes());
+    let units = KERNEL_SOURCE
+        .iter()
+        .copied()
+        .chain([KERNEL_LOCKFILE, KERNEL_TOOLCHAIN]);
+    for unit in units {
+        hasher.update((unit.len() as u64).to_le_bytes());
+        hasher.update(unit.as_bytes());
     }
     let digest = hasher.finalize();
     let mut s = String::from("sha256:");
@@ -89,7 +106,9 @@ pub fn kernel_ref() -> String {
     s
 }
 
-pub use event::{Decision, Event, EventLog};
+pub use event::{
+    line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, CHAIN_GENESIS,
+};
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
 pub use hive::{first_write_conflict, validate_spawn, HiveViolation, SpawnRequest};
 pub use intake::{admit, AdmitError};
@@ -120,5 +139,24 @@ mod kernel_ref_tests {
         let corpus: String = KERNEL_SOURCE.concat();
         assert!(corpus.contains("blocked by enforce-file-scope"));
         assert!(corpus.contains("fn pre_tool"));
+    }
+
+    #[test]
+    fn kernel_ref_binds_the_dependency_lock_and_toolchain() {
+        // Identical source built against different dependency versions or a
+        // different rustc is a different enforcement binary; the embedded lock
+        // and toolchain identity are what let the digest tell them apart.
+        assert!(
+            KERNEL_LOCKFILE.contains("[[package]]"),
+            "the embedded lockfile is the real Cargo.lock"
+        );
+        assert!(
+            KERNEL_TOOLCHAIN.starts_with("rustc"),
+            "the toolchain identity comes from the actual rustc: {KERNEL_TOOLCHAIN}"
+        );
+        assert!(
+            KERNEL_TOOLCHAIN.contains("host:"),
+            "--verbose identity includes the host triple: {KERNEL_TOOLCHAIN}"
+        );
     }
 }

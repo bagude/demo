@@ -212,7 +212,8 @@ pub fn ir_digest(compiled: &spec::CompiledSpec) -> String {
 /// label: two materially different source trees produce different references
 /// even when neither bumped its package version, which is exactly the failure
 /// mode that let a stale artifact keep calling itself `0.1.0`. Source rather
-/// than the built binary keeps the digest deterministic across toolchains.
+/// than the built binary keeps the digest reproducible: the same source, lock,
+/// and toolchain always agree, without requiring bit-reproducible builds.
 const COMPILER_SOURCE: &[&str] = &[
     // front-end (spec crate): metamodel, parser, resolver, checker
     include_str!("../../spec/src/lib.rs"),
@@ -229,23 +230,41 @@ const COMPILER_SOURCE: &[&str] = &[
     include_str!("backend/portable.rs"),
 ];
 
+/// The workspace dependency lock, embedded at compile time. The compiler's
+/// behavior is a function of its dependencies too: identical source built
+/// against different serde/yaml/parser versions can generate differently, so
+/// the lock is part of the compiler's identity.
+const COMPILER_LOCKFILE: &str = include_str!("../../../Cargo.lock");
+
+/// The toolchain that built this compiler (`rustc --version --verbose`:
+/// release, commit hash, host triple), captured by `build.rs`. The same
+/// source compiled by a different rustc is a different compiler.
+const COMPILER_TOOLCHAIN: &str = env!("HARNESSC_RUSTC_VERSION");
+
 /// The identity of the compiler that produced an artifact: a content digest of
-/// the compiler and front-end **implementation source**, folded together with
-/// the IR schema version and the target binding.
+/// the compiler and front-end **implementation source**, the **dependency
+/// lock**, and the **toolchain**, folded together with the IR schema version
+/// and the target binding.
 ///
 /// Source provenance and executable provenance are different things — the same
 /// `harness.patterns.yaml` compiled by a different compiler can govern a
 /// materially different system. Binding only the spec bytes (or only version
 /// labels, which two divergent trees can share) would let a stale or divergent
-/// artifact carry a matching reference. Hashing the implementation source closes
-/// that gap: change the compiler, change the reference.
+/// artifact carry a matching reference. Hashing implementation source closes
+/// the source gap; hashing the lock and toolchain closes the build gap:
+/// change the compiler — its code, its dependencies, or the rustc that built
+/// it — and the reference changes.
 pub fn compiler_digest(target: &str) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    for src in COMPILER_SOURCE {
-        // Length-prefix each unit so file boundaries can't be shuffled into a
+    let units = COMPILER_SOURCE
+        .iter()
+        .copied()
+        .chain([COMPILER_LOCKFILE, COMPILER_TOOLCHAIN]);
+    for unit in units {
+        // Length-prefix each unit so boundaries can't be shuffled into a
         // collision.
-        buf.extend_from_slice(&(src.len() as u64).to_le_bytes());
-        buf.extend_from_slice(src.as_bytes());
+        buf.extend_from_slice(&(unit.len() as u64).to_le_bytes());
+        buf.extend_from_slice(unit.as_bytes());
     }
     buf.extend_from_slice(format!(";ir_schema={IR_SCHEMA_VERSION};target={target}").as_bytes());
     sha256_hex(&buf)
@@ -527,8 +546,10 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
+        "required": ["seq", "prev", "run_id", "action_id", "actor", "timestamp", "transition", "decision", "playbook_ref", "kernel_ref"],
         "properties": {
+            "seq": { "type": "integer", "minimum": 0 },
+            "prev": { "type": "string" },
             "run_id": { "type": "string" },
             "task_id": { "type": "string" },
             "parent_task_id": { "type": "string" },
@@ -618,6 +639,25 @@ mod tests {
     }
 
     #[test]
+    fn compiler_digest_binds_the_dependency_lock_and_toolchain() {
+        // Identical source built against different dependency versions or a
+        // different rustc is a different compiler; the embedded lock and
+        // toolchain identity are what let the digest tell them apart.
+        assert!(
+            COMPILER_LOCKFILE.contains("[[package]]"),
+            "the embedded lockfile is the real Cargo.lock"
+        );
+        assert!(
+            COMPILER_TOOLCHAIN.starts_with("rustc"),
+            "the toolchain identity comes from the actual rustc: {COMPILER_TOOLCHAIN}"
+        );
+        assert!(
+            COMPILER_TOOLCHAIN.contains("host:"),
+            "--verbose identity includes the host triple: {COMPILER_TOOLCHAIN}"
+        );
+    }
+
+    #[test]
     fn compiler_digest_distinguishes_targets() {
         assert_ne!(
             compiler_digest("claude-code"),
@@ -627,10 +667,11 @@ mod tests {
     }
 
     #[test]
-    fn event_schema_requires_both_run_binding_identities() {
-        // A governed event must carry which Playbook governed it AND which
-        // kernel executed it; the schema makes both mandatory rather than
-        // conventional. (Legacy records carry explicit empty strings.)
+    fn event_schema_requires_run_binding_and_chain_fields() {
+        // A governed record must carry which Playbook governed it, which
+        // kernel executed it, AND its position in the hash chain; the schema
+        // makes all of it mandatory rather than conventional. (Legacy records
+        // are exactly the ones that fail this schema.)
         let schema = event_schema();
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -640,5 +681,7 @@ mod tests {
             .collect();
         assert!(required.contains(&"playbook_ref"));
         assert!(required.contains(&"kernel_ref"));
+        assert!(required.contains(&"seq"));
+        assert!(required.contains(&"prev"));
     }
 }

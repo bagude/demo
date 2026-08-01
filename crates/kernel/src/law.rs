@@ -78,6 +78,13 @@ pub fn is_protected(protected: &[String], path: &str) -> bool {
 /// anti-pattern this replaces: here, protection rides on the same default-deny
 /// allowlist, and amendment is never an ambient capability.
 pub fn enforce(packet: &TaskPacket, path: &str, protected: &[String]) -> Enforcement {
+    // Refuse a path that is absolute or escapes the workspace before any scope
+    // reasoning — a traversal must never be able to reach a protected artifact.
+    if crate::packet::normalize_components(path).is_none() {
+        return Enforcement::Deny(format!(
+            "'{path}' is absolute or escapes the workspace root; such paths are never authorized"
+        ));
+    }
     let in_scope = packet.authorizes_write(path);
     if is_protected(protected, path) {
         if in_scope && packet.amends_enforcement {
@@ -190,6 +197,19 @@ mod tests {
             enforce(&packet(), "src/lib.rs", &protected()),
             Enforcement::Allow
         );
+    }
+
+    #[test]
+    fn traversal_to_a_protected_artifact_is_denied() {
+        // Even with a permissive scope, a `..` escape cannot reach a hook.
+        let mut p = packet();
+        p.files.push(FileScope::write("src/"));
+        let d = enforce(
+            &p,
+            "src/../harness/hooks/enforce_file_scope.sh",
+            &protected(),
+        );
+        assert!(matches!(d, Enforcement::Deny(reason) if reason.contains("escapes the workspace")));
     }
 
     #[test]

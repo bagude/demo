@@ -56,6 +56,12 @@ pub struct Node {
     pub kind: PatternKind,
     /// The instance label if the occurrence was named (`Port[staging]`).
     pub instance: Option<String>,
+    /// The declared position name (`Port[github as staging_deployer]` →
+    /// `staging_deployer`). Distinct from the binding id: two positions sharing
+    /// one binding can be named apart, and a singleton kind's position can be
+    /// named even though it has no binding id (`Sandbox[as worker]`). Unique
+    /// across the composition (checked).
+    pub alias: Option<String>,
     /// The binding ids this position resolves to: the named id, or every
     /// binding of the kind for an anonymous occurrence. Empty for singleton
     /// kinds, which have no id namespace.
@@ -256,6 +262,15 @@ impl ResolvedGraph {
         self.nodes.iter().any(|n| n.kind == kind)
     }
 
+    /// The position declared with this alias, if any. Aliases are unique
+    /// across the composition (the checker rejects duplicates), so this is at
+    /// most one node.
+    pub fn node_by_alias(&self, alias: &str) -> Option<&Node> {
+        self.nodes
+            .iter()
+            .find(|n| n.alias.as_deref() == Some(alias))
+    }
+
     /// Whether some `from`-kind position stands in `relation` to some
     /// `to`-kind position (edge direction is the operator's own).
     fn kinds_related(&self, relation: Relation, from: PatternKind, to: PatternKind) -> bool {
@@ -342,6 +357,7 @@ impl ResolvedGraph {
                     id,
                     kind: inst.kind,
                     instance: inst.id.clone(),
+                    alias: inst.alias.clone(),
                     bindings: resolved_bindings(b, inst.kind, inst.id.as_deref()),
                     replicated,
                 });
@@ -623,6 +639,21 @@ platform: { type: claude-code }
             (PatternKind::Port, "gh"),
             (PatternKind::Law, "guard-writes")
         ));
+    }
+
+    #[test]
+    fn aliased_positions_share_a_binding_but_are_named_apart() {
+        // The reviewer's canonical case: one implementation, two positions.
+        let expr =
+            parse("Port[staging as deployer] within Sandbox + Port[staging as annotator] -> Gate")
+                .unwrap();
+        let g = ResolvedGraph::resolve(&expr, &bindings(TWO_PORTS));
+        let deployer = g.node_by_alias("deployer").expect("deployer exists");
+        let annotator = g.node_by_alias("annotator").expect("annotator exists");
+        assert_ne!(deployer.id, annotator.id, "two distinct positions");
+        assert_eq!(deployer.bindings, annotator.bindings, "one shared binding");
+        assert_eq!(deployer.bindings, vec!["staging".to_string()]);
+        assert!(g.node_by_alias("ghost").is_none());
     }
 
     #[test]

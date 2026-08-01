@@ -420,26 +420,40 @@ pub struct PatternInstance {
     /// The binding id this occurrence names, or `None` for an anonymous
     /// occurrence that stands for every binding of `kind`.
     pub id: Option<String>,
+    /// The declared name of this *position* (`Port[github as staging_deployer]`
+    /// declares `staging_deployer`), distinct from the binding id: two
+    /// positions may share one implementation binding yet be named apart. A
+    /// singleton kind, which has no binding id at all, can still name its
+    /// position (`Sandbox[as worker_sandbox]`). Aliases are unique across the
+    /// whole composition.
+    pub alias: Option<String>,
 }
 
 impl PatternInstance {
     pub fn anonymous(kind: PatternKind) -> Self {
-        PatternInstance { kind, id: None }
+        PatternInstance {
+            kind,
+            id: None,
+            alias: None,
+        }
     }
 
     pub fn named(kind: PatternKind, id: impl Into<String>) -> Self {
         PatternInstance {
             kind,
             id: Some(id.into()),
+            alias: None,
         }
     }
 }
 
 impl fmt::Display for PatternInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.id {
-            Some(id) => write!(f, "{}[{id}]", self.kind),
-            None => f.write_str(self.kind.as_str()),
+        match (&self.id, &self.alias) {
+            (Some(id), Some(a)) => write!(f, "{}[{id} as {a}]", self.kind),
+            (Some(id), None) => write!(f, "{}[{id}]", self.kind),
+            (None, Some(a)) => write!(f, "{}[as {a}]", self.kind),
+            (None, None) => f.write_str(self.kind.as_str()),
         }
     }
 }

@@ -82,6 +82,7 @@ pub fn check(
     check_cross_reference(spec, expr, &mut d);
     check_instance_references(spec, expr, &mut d);
     check_active_coverage(spec, graph, &mut d);
+    check_aliases(spec, graph, &mut d);
     check_enforcement_activation(spec, graph, &mut d);
     check_gate(spec, &mut d);
     check_laws(spec, binding, &mut d);
@@ -200,6 +201,9 @@ fn id_is_addressable(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        // Grammar keywords can never be read back as an id.
+        && id != "as"
+        && id != "within"
 }
 
 fn check_instance_references(spec: &SpecFile, expr: &Expr, d: &mut Vec<Diagnostic>) {
@@ -310,6 +314,43 @@ fn check_active_coverage(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Dia
                     ),
                 ));
             }
+        }
+    }
+}
+
+/// Position aliases (`Port[github as staging_deployer]`) name architectural
+/// positions apart from binding identity. For the name to *be* an identity it
+/// must be unambiguous: unique across the whole composition, and not shadowing
+/// any addressable binding id (a reader of `staging` must never wonder whether
+/// a position or a binding is meant).
+fn check_aliases(spec: &SpecFile, graph: &ResolvedGraph, d: &mut Vec<Diagnostic>) {
+    let b = &spec.bindings;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for node in graph.nodes() {
+        let Some(alias) = node.alias.as_deref() else {
+            continue;
+        };
+        if !seen.insert(alias) {
+            d.push(Diagnostic::error(
+                "composition.duplicate_alias",
+                format!(
+                    "alias '{alias}' names more than one position; a position name must be unique \
+                     across the composition"
+                ),
+            ));
+        }
+        if let Some(kind) = ADDRESSABLE_KINDS
+            .iter()
+            .copied()
+            .find(|k| addressable_ids(b, *k).is_some_and(|ids| ids.contains(&alias)))
+        {
+            d.push(Diagnostic::error(
+                "composition.alias_shadows_binding",
+                format!(
+                    "alias '{alias}' is also the id of a {kind} binding; a position name must not \
+                     shadow a binding id"
+                ),
+            ));
         }
     }
 }
@@ -1266,6 +1307,71 @@ bindings:
 platform: { type: claude-code }
 "#;
         assert!(codes(&check_yaml(yaml)).contains(&"binding.unaddressable_id"));
+    }
+
+    #[test]
+    fn duplicate_aliases_are_rejected() {
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging as edge] within Sandbox + Port[metrics as edge]"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+    - { id: metrics, server: b, write: [y], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        assert!(codes(&check_yaml(yaml)).contains(&"composition.duplicate_alias"));
+    }
+
+    #[test]
+    fn alias_shadowing_a_binding_id_is_rejected() {
+        // Naming a position `metrics` while a Port binding `metrics` exists
+        // would make every later mention of `metrics` ambiguous.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging as metrics] within Sandbox"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+    - { id: metrics, server: b, write: [y], write_guard: guard-writes }
+platform: { type: claude-code }
+"#;
+        let c = codes(&check_yaml(yaml));
+        assert!(c.contains(&"composition.alias_shadows_binding"));
+    }
+
+    #[test]
+    fn singleton_position_alias_is_allowed_where_binding_id_is_not() {
+        // `Sandbox[worker]` is unaddressable (no binding id namespace), but
+        // `Sandbox[as worker]` names the POSITION, which is exactly what a
+        // singleton kind needs.
+        let yaml = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "Port[staging] within Sandbox[as worker] + Law + Ledger"
+bindings:
+  sandbox: { workspace: branch }
+  laws:
+    - { id: guard-writes, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: a, write: [x], write_guard: guard-writes, sandboxed: propose }
+  ledger:
+    event_schema: e.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let c = codes(&check_yaml(yaml));
+        assert!(!c.contains(&"composition.unaddressable_pattern"));
+        assert!(!c.contains(&"composition.duplicate_alias"));
     }
 
     #[test]

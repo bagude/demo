@@ -218,11 +218,12 @@ fn print_model(compiled: &spec::CompiledSpec, binding: &dyn spec::Binding) {
     let g = &compiled.graph;
     println!("graph:");
     for n in g.nodes() {
-        let inst = n
-            .instance
-            .as_deref()
-            .map(|i| format!("[{i}]"))
-            .unwrap_or_default();
+        let inst = match (n.instance.as_deref(), n.alias.as_deref()) {
+            (Some(i), Some(a)) => format!("[{i} as {a}]"),
+            (Some(i), None) => format!("[{i}]"),
+            (None, Some(a)) => format!("[as {a}]"),
+            (None, None) => String::new(),
+        };
         let repl = if n.replicated { "  (replicated)" } else { "" };
         println!(
             "  node {}: {}{}  bindings[{}]{}",

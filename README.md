@@ -42,6 +42,11 @@ exercise the scale patterns — [`examples/research-org.patterns.yaml`](examples
 addressability**: [`examples/instance-addressed.patterns.yaml`](examples/instance-addressed.patterns.yaml)
 (`(Port[staging] within Sandbox) -> Gate + Port[metrics] + Law + Ledger`), where
 a derived obligation binds to `Port[staging]` and leaves its sibling alone.
+[`examples/aliased-positions.patterns.yaml`](examples/aliased-positions.patterns.yaml)
+shows **named positions**: `Port[github as staging_deployer]` and
+`Port[github as release_annotator]` are two architectural positions backed by
+one implementation binding, named apart — and `Sandbox[as worker_sandbox]`
+names a position of a singleton kind that has no binding id at all.
 
 ## Workspace
 
@@ -110,6 +115,11 @@ Each of these is a compile **error**, verified by tests in
   `binding.unaddressable_id` (an id like `github.production` falls outside the
   grammar's `[A-Za-z0-9_-]+` alphabet — it would exist but be unnameable, so
   reference integrity holds at the lexical boundary too).
+- **`composition.duplicate_alias` / `composition.alias_shadows_binding`** — a
+  position name (`Port[github as staging_deployer]`) is an identity, so it must
+  be unique across the composition and must not shadow any binding id; the
+  grammar keywords `as`/`within` are likewise rejected as binding ids
+  (`binding.unaddressable_id`), since they could never be read back.
 - **`composition.control_without_interceptor`** — a Verb composed `within` a
   Law whose enclosing occurrences resolve to no **Guard**. An Obligation Law
   records debt after the fact; it does not intercept the Verb, and "some Law
@@ -165,9 +175,14 @@ case-law scoping + backend generation
 
 Three properties the AST alone could not provide:
 
-- **Positions are preserved.** Every syntactic occurrence is its own node, so
-  `Port[github] within Sandbox + Port[github] -> Gate` is two architectural
-  positions sharing one binding — not collapsed into one identity.
+- **Positions are preserved and nameable.** Every syntactic occurrence is its
+  own node, so `Port[github] within Sandbox + Port[github] -> Gate` is two
+  architectural positions sharing one binding — not collapsed into one
+  identity. An **alias names the position**: `Port[github as staging_deployer]`
+  declares the position's identity distinct from the binding's, unique across
+  the composition, carried on the IR node, serialized into the bundle, and
+  addressable via `node_by_alias`. A singleton kind's position is nameable the
+  same way (`Sandbox[as worker_sandbox]`) even though it has no binding id.
 - **Activation is explicit.** A binding is part of the compiled system only if
   the composition activates it: an anonymous `Port` activates every Port
   binding; `Port[staging]` activates exactly that one. Activation then **closes
@@ -301,7 +316,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 135 tests: metamodel, checker rejections for every
+cargo test --workspace     # 142 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -334,12 +349,17 @@ authenticated principal.
 Documented follow-ups (not yet done). The graph IR drives activation,
 generation, **and the relational case law**; binding dependencies are
 **represented as typed `uses` edges**; one IR instance is checked, carried,
-serialized, and generated from; and enforcement activation is explicit
-(`always_on` or activated, else rejected). The remaining step of that arc is
-surface syntax for **declared node identity** distinct from binding identity
-(today two positions sharing a binding are distinct nodes, but they cannot yet
-be *named* apart, e.g. `staging_deployer` vs `release_annotator` both backed by
-`Port: github`). Beyond it: a
+serialized, and generated from; enforcement activation is explicit
+(`always_on` or activated, else rejected); and positions carry **declared
+node identity** distinct from binding identity (`Port[github as
+staging_deployer]`, unique, shadow-checked, serialized). The next steps of
+that arc: make aliases **referenceable** in relations (today an alias names a
+position but relational queries still address kinds and binding ids — an
+aliased relation like `staging_deployer -> Gate` needs alias-addressed
+selectors), and **runtime-instance identity** beneath node identity
+(pattern kind → composition node → runtime instance, e.g.
+`run-42/staging_deployer/attempt-2`) for per-worker Gate approval and
+worker-scoped obligations. Beyond it: a
 **three-level identity** model (pattern kind → composition node → runtime
 instance) for per-worker Gate approval and worker-scoped obligations; a
 **declared obligation scope** (`run | task | branch | workspace | action`); a

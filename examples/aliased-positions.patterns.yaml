@@ -1,0 +1,65 @@
+# Named positions: one implementation binding, two architectural positions.
+#
+#   (Port[github as staging_deployer] within Sandbox[as worker_sandbox])
+#     -> Gate + Port[github as release_annotator] + Law + Ledger
+#
+# Both Port occurrences resolve to the SAME binding (`github`) — one MCP
+# server, one credential, one write-guard — but they occupy two different
+# architectural positions, and the alias names them apart:
+#
+#   * `staging_deployer`  runs inside the worker sandbox, so the binding must
+#     declare `sandboxed` behavior (the Within relation derives it);
+#   * `release_annotator` sits outside, feeding nothing into the sandbox.
+#
+# Aliases are position identity, not binding identity: they are unique across
+# the composition, must not shadow any binding id, and appear in the serialized
+# IR (`harness/playbook.json` → graph.nodes[].alias), so the compiled
+# architecture is auditable by name. A singleton kind, which has no binding id
+# at all, gets a nameable position the same way (`Sandbox[as worker_sandbox]`).
+
+harness:
+  name: aliased-positions
+  version: 0.1.0
+
+composition:
+  expression: "(Port[github as staging_deployer] within Sandbox[as worker_sandbox]) -> Gate + Port[github as release_annotator] + Law + Ledger"
+
+bindings:
+  sandbox:
+    workspace: branch
+    lineage: [source_revision, sandbox_id, merge_revision]
+
+  laws:
+    - id: enforce-file-scope
+      kind: guard
+      event: pre_tool
+      applies_to: [edit, write]
+
+  ports:
+    # One binding, used from two named positions. Because SOME position runs
+    # within the Sandbox, the binding declares its sandboxed behavior.
+    - id: github
+      server: github
+      observe: [issues]
+      write: [comments]
+      write_guard: enforce-file-scope
+      sandboxed: propose
+
+  gate:
+    id: approve-release
+    boundary: before_release
+    checkpoint_schema: harness/schemas/checkpoint.schema.json
+    bind:
+      - action_hash
+      - repository_revision
+      - working_tree_hash
+      - approver
+      - expiry
+
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials, raw_model_context]
+
+platform:
+  type: claude-code

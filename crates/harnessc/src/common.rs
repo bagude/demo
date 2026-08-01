@@ -108,6 +108,7 @@ pub fn graph_json(compiled: &spec::CompiledSpec) -> Value {
                 "node_id": n.id.0,
                 "pattern": n.kind.to_string(),
                 "instance": n.instance,
+                "alias": n.alias,
                 "bindings": n.bindings,
                 "replicated": n.replicated,
                 "origin": "surface",

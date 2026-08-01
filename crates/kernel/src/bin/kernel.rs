@@ -1000,9 +1000,6 @@ fn pre_tool(
     playbook_ref: Option<String>,
     protected_path: Option<&std::path::Path>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let packet = load_packet(packet_path)?;
-    let protected = load_protected(protected_path)?;
-
     let mut stdin = String::new();
     std::io::stdin().read_to_string(&mut stdin)?;
     let path = extract_target_path(&stdin);
@@ -1011,6 +1008,28 @@ fn pre_tool(
     let Some(path) = path else {
         return Ok(ExitCode::SUCCESS);
     };
+
+    // The Guard's fail-safe: absent or unreadable authorization is NO
+    // authorization. This must be a BLOCK (exit 2), not an error exit — the
+    // hook protocol treats any other status as a warning and lets the tool
+    // call proceed, which would leave an unpacketed session ungoverned
+    // precisely when no scope has been granted at all.
+    let packet = match load_packet(packet_path) {
+        Ok(p) => p,
+        Err(e) => {
+            return deny_without_authorization(
+                ledger,
+                run_id,
+                playbook_ref.as_deref(),
+                &path,
+                &format!(
+                    "no active task packet ({e}); work enters this harness only as an \
+                     admitted packet — submit one through the Intake and activate it"
+                ),
+            );
+        }
+    };
+    let protected = load_protected(protected_path)?;
 
     // Judged against the CANONICAL target: symlinks resolved on the real
     // filesystem (rooted at the hook's working directory), so a link cannot
@@ -1135,6 +1154,43 @@ fn pre_bash(
 
 /// Load protected path prefixes from a file (one per line; `#` comments and
 /// blanks ignored). Missing file → empty set.
+/// Refuse a tool call because no authorization exists to judge it against,
+/// recording the refusal as evidence. Failing to record does not un-block:
+/// the deny (exit 2) stands even if the ledger append fails — a fail-safe
+/// guard must never degrade into a warning because its own bookkeeping did.
+fn deny_without_authorization(
+    ledger: Option<&std::path::Path>,
+    run_id: &str,
+    playbook_ref: Option<&str>,
+    path: &str,
+    reason: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if let Some(ledger) = ledger {
+        let event = Event {
+            run_id: run_id.to_string(),
+            task_id: None,
+            parent_task_id: None,
+            action_id: "pre_tool".into(),
+            actor: "kernel".into(),
+            timestamp: now_rfc3339(),
+            transition: "pre_tool.edit".into(),
+            stage: Stage::Authorized.as_str().into(),
+            input_refs: vec![format!("path:{path}")],
+            output_refs: vec![],
+            decision: Decision::Denied,
+            evidence_refs: vec![format!("reason:{reason}")],
+            playbook_ref: playbook_ref.unwrap_or_default().into(),
+            kernel_ref: kernel::kernel_ref(),
+            attempt_id: None,
+        };
+        if let Err(e) = EventLog::at(ledger).append(&event) {
+            eprintln!("warning: could not record the refusal: {e}");
+        }
+    }
+    eprintln!("blocked by enforce-file-scope: {reason}");
+    Ok(ExitCode::from(2))
+}
+
 fn load_protected(
     path: Option<&std::path::Path>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {

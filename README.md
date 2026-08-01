@@ -99,6 +99,14 @@ Each of these is a compile **error**, verified by tests in
 - **`law.event_mismatch`** — a Guard bound post-tool or an Obligation pre-tool.
 - **`composition.referenced_but_unbound`** — a pattern named in the composition
   with no binding supplied.
+- **Reference integrity** — a named occurrence must resolve to exactly one real
+  binding before any case law runs, so a typo cannot silently disconnect the
+  declared topology from the system. `composition.unknown_instance`
+  (`Port[ghost]` matches no Port binding — the fail-open hole that would
+  otherwise *suppress* the derived obligation), `composition.instance_kind_mismatch`
+  (`Port[x]` where `x` is a Law id), `composition.unaddressable_pattern`
+  (`Sandbox[x]` — a singleton with no id to name), and `binding.duplicate_id`
+  (two bindings share an id, so no reference resolves to exactly one).
 - **`pipeline.stage_type_mismatch`** — a Pipeline whose typed stage interfaces
   don't chain (one stage's output ≠ the next's input). That, not a fixed order,
   is what makes it a Pipeline.
@@ -217,7 +225,7 @@ governing its current run*.
 ## Tests
 
 ```sh
-cargo test --workspace     # 115 tests: metamodel, checker rejections for every
+cargo test --workspace     # 120 tests: metamodel, checker rejections for every
                            # pattern, composition parser + precedence + instance
                            # addressability + case law, kernel enforcement +
                            # self-protection + Law of the Hive, gate revalidation +
@@ -234,20 +242,33 @@ derived obligation attaches to the named component rather than the pattern
 category; the operator grammar has a **formal precedence** (`+` loosest) so a
 mixed expression parses one way; the direction-reversing `governs` relation was
 removed in favor of `flow_connected` / `runs_under`; obligations are scoped per
-run; file authority is decided on **platform-independent** normalized components
-(absolute, `..`, backslash, drive-letter and alternate-data-stream vectors all
-rejected); checkpoints are written atomically (temp → fsync → rename → dir-fsync)
-with hashed, injection-safe names and the Ledger is fsynced; and approver
-identity distinguishes a *claimed* label from an authenticated principal.
+run; every named occurrence is **reference-resolved** to exactly one binding
+(unknown/mismatched/unaddressable names and duplicate ids are rejected) so a typo
+cannot silently disconnect the topology from the system; file authority is
+decided on **platform-independent** normalized components (absolute, `..`,
+backslash, drive-letter and alternate-data-stream vectors all rejected);
+checkpoints are written with the POSIX atomic-replace sequence (temp → fsync →
+rename → dir-fsync, with the directory fsync on Unix) and hashed, injection-safe
+names, and the Ledger is fsynced; and approver identity distinguishes a *claimed*
+label from an authenticated principal.
 
-Documented follow-ups (not yet done): **semantically-typed relations** sourced
-from bindings (a Delegate's declared Port list as an `invokes`/`uses` edge, not
-inferred from the linear expression); a **declared obligation scope** (`run |
-task | branch | workspace | action`) so parallel workers in one run discharge
-independently; a **unified transition protocol** (Proposed→Authorized→Executing→…→Recorded)
-to turn the independent runtime modules into one execution kernel;
-**transactional Hive budget** reservations; a **tamper-evident Ledger** (sequence
-+ prev-hash chain); **symlink/canonical** resolution for existing write targets;
-a real **IdP/signature** integration for approvals; a **Python/OpenAI-Agents**
-back-end behind the same `Binding`; and version-promotion tooling for approved
-Refinery proposals.
+Documented follow-ups (not yet done). The next foundational change is to lower
+the surface expression into an **explicit typed composition graph** —
+`expression → AST → resolve instances/bindings → typed graph → derive
+obligations` — so case law runs over a graph, not the syntax tree. That graph
+separates **node identity from binding identity** (two architectural positions
+may share one implementation: `staging_deployer` and `release_annotator` both
+backed by `Port: github`), makes the subtree-based relation semantics explicit
+(a grouped `(A + B) -> (C + D)` currently over-approximates to all four data
+paths), and adds **semantically-typed relations** sourced from bindings (a
+Delegate's declared Port list as an `invokes`/`uses` edge, not inferred from
+linear syntax). Beyond it: a **three-level identity** model (pattern kind →
+composition node → runtime instance) for per-worker Gate approval and
+worker-scoped obligations; a **declared obligation scope** (`run | task | branch
+| workspace | action`); a **unified transition protocol**
+(Proposed→Authorized→Executing→…→Recorded); **transactional Hive budget**
+reservations; a **tamper-evident Ledger** (sequence + prev-hash chain);
+**symlink/canonical and case/Unicode-alias** resolution for existing write
+targets; a real **IdP/signature** integration for approvals; a
+**Python/OpenAI-Agents** back-end behind the same `Binding`; and version-promotion
+tooling for approved Refinery proposals.

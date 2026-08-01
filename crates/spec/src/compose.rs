@@ -314,6 +314,33 @@ impl Expr {
         }
     }
 
+    /// Every *named* occurrence in the expression (those carrying an instance
+    /// id), deduplicated by identity. Anonymous occurrences are excluded — they
+    /// name no binding and so nothing to resolve. This is what reference
+    /// resolution walks: a `Port[ghost]` that resolves to no Port binding is a
+    /// fail-open hole (the derived obligation silently attaches to nothing), so
+    /// the checker rejects it before composition case law runs.
+    pub fn named_instances(&self) -> Vec<&PatternInstance> {
+        let mut v = Vec::new();
+        self.collect_named(&mut v);
+        dedup(v)
+    }
+
+    fn collect_named<'e>(&'e self, out: &mut Vec<&'e PatternInstance>) {
+        match self {
+            Expr::Pattern(i) => {
+                if i.id.is_some() {
+                    out.push(i);
+                }
+            }
+            Expr::Coexist(a, b) | Expr::Seq(a, b) | Expr::Provision(a, b) | Expr::Within(a, b) => {
+                a.collect_named(out);
+                b.collect_named(out);
+            }
+            Expr::Replicate(a, _) => a.collect_named(out),
+        }
+    }
+
     /// The `inner`-kind occurrences that execute *within* some occurrence
     /// matching `outer`. Mirrors [`Self::is_within`], but names the components.
     pub fn instances_within<'a>(

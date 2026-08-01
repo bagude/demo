@@ -161,6 +161,15 @@ pointer describing the old set, so `verify` reports the exact divergence
 rather than trusting either version. `.harnessc/` is local build state, not
 checked in.
 
+`harnessc restore` rolls the live tree back to any retained version — or
+re-materializes the active one — without recompiling: the retained copy is
+**self-verified against its own manifest** before anything is touched (a
+rollback source that cannot prove itself is not a rollback source), files the
+live bundle has that the restored one lacks are retired exactly as a build
+would, and the `current` pointer follows. `harnessc restore --list` enumerates
+the retained versions and marks the active one; `--playbook` accepts a full
+ref or unique prefix.
+
 ## What the compiler rejects (the interesting part)
 
 Each of these is a compile **error**, verified by tests in

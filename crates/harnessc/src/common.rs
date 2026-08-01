@@ -395,18 +395,39 @@ pub fn ensure_trailing_slash(s: &str) -> String {
     }
 }
 
-/// The runtime directories a harness needs, derived from its bindings.
-pub fn runtime_dirs(spec: &spec::SpecFile) -> Vec<String> {
+/// The runtime directories a harness needs, derived from the **active
+/// components** of the resolved graph. A binding the composition never
+/// activates gets no runtime directory: membership in the compiled
+/// architecture is the graph's call, never inferred from raw binding presence.
+pub fn runtime_dirs(compiled: &spec::CompiledSpec) -> Vec<String> {
+    use spec::PatternKind;
+    let spec = &compiled.spec;
+    let g = &compiled.graph;
     let mut dirs = Vec::new();
-    if let Some(intake) = &spec.bindings.intake {
+    if let Some(intake) = spec
+        .bindings
+        .intake
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Intake))
+    {
         dirs.push(ensure_trailing_slash(&intake.storage));
     }
-    if let Some(ledger) = &spec.bindings.ledger {
+    if let Some(ledger) = spec
+        .bindings
+        .ledger
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Ledger))
+    {
         if let Some((dir, _)) = ledger.destination.rsplit_once('/') {
             dirs.push(format!("{dir}/"));
         }
     }
-    if spec.bindings.gate.is_some() {
+    if spec
+        .bindings
+        .gate
+        .as_ref()
+        .is_some_and(|gate| g.is_active(PatternKind::Gate, &gate.id))
+    {
         dirs.push("checkpoints/".to_string());
     }
     dirs.sort();
@@ -526,16 +547,37 @@ pub fn event_schema() -> Value {
     })
 }
 
-/// The three kernel schemas at the paths the spec names for them.
-pub fn schema_files(prov: &Prov, spec: &spec::SpecFile) -> Vec<GenFile> {
+/// The kernel schemas at the paths the spec names for them — emitted only for
+/// components the resolved graph activates. An Intake that is bound but never
+/// enters the composition is not part of the compiled architecture, so its
+/// schema is not part of the Playbook.
+pub fn schema_files(prov: &Prov, compiled: &spec::CompiledSpec) -> Vec<GenFile> {
+    use spec::PatternKind;
+    let spec = &compiled.spec;
+    let g = &compiled.graph;
     let mut out = Vec::new();
-    if let Some(intake) = &spec.bindings.intake {
+    if let Some(intake) = spec
+        .bindings
+        .intake
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Intake))
+    {
         out.push(prov.json_file(&intake.task_schema, task_packet_schema()));
     }
-    if let Some(gate) = &spec.bindings.gate {
+    if let Some(gate) = spec
+        .bindings
+        .gate
+        .as_ref()
+        .filter(|gate| g.is_active(PatternKind::Gate, &gate.id))
+    {
         out.push(prov.json_file(&gate.checkpoint_schema, checkpoint_schema()));
     }
-    if let Some(ledger) = &spec.bindings.ledger {
+    if let Some(ledger) = spec
+        .bindings
+        .ledger
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Ledger))
+    {
         out.push(prov.json_file(&ledger.event_schema, event_schema()));
     }
     out

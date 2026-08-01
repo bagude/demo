@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GENERATED FROM: harness.patterns.yaml
 # SOURCE: sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2
-# PLAYBOOK: sha256:ce27daccc6adc1bb666a2031f051149c0465b563a7fd2d1b7a77ee11eb412835
+# PLAYBOOK: sha256:6404c65bdec1496c3817bb20aee3b9002af2d5cfea728ced0fecdf0fae92285b
 # GENERATOR: harnessc 0.1.0
 # DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.
 # Gate: block `git commit` while a required obligation is outstanding (per run).

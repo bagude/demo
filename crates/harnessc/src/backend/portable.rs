@@ -8,7 +8,6 @@
 //! the binding changes.
 
 use serde_json::{json, Value};
-use spec::model::SpecFile;
 use spec::{Binding, CompiledSpec};
 
 use crate::backend::Backend;
@@ -38,18 +37,21 @@ impl Backend for Portable {
     }
 
     fn generate(&self, compiled: &CompiledSpec, refs: &Refs) -> Generated {
-        let spec = &compiled.spec;
         let prov = Prov { refs };
         let mut files = Vec::new();
 
         files.push(manifest(&prov, compiled));
-        files.extend(hook_files(&prov, spec));
+        files.extend(hook_files(&prov, compiled));
         files.push(protected_file(&prov));
         // Schemas placed under a flat schemas/ dir — the backend owns layout.
+        // These three describe the KERNEL's own types (invariant across
+        // compositions), not any one component, so they are unconditional —
+        // unlike the claude-code target, where each schema's path is named by
+        // a component binding and so follows that component's activation.
         files.push(prov.json_file("schemas/task-packet.schema.json", task_packet_schema()));
         files.push(prov.json_file("schemas/checkpoint.schema.json", checkpoint_schema()));
         files.push(prov.json_file("schemas/event.schema.json", event_schema()));
-        for dir in runtime_dirs(spec) {
+        for dir in runtime_dirs(compiled) {
             files.push(prov.gitkeep(&dir));
         }
         files.push(readme(&prov, refs));
@@ -63,16 +65,22 @@ impl Backend for Portable {
     }
 }
 
-fn gate_obligations(spec: &SpecFile) -> Vec<String> {
-    spec.bindings
+/// The commit Gate's obligations — only when the Gate is an active component.
+fn gate_obligations(compiled: &CompiledSpec) -> Vec<String> {
+    compiled
+        .spec
+        .bindings
         .gate
         .as_ref()
+        .filter(|g| compiled.graph.is_active(spec::PatternKind::Gate, &g.id))
         .map(|g| g.requires_obligations.clone())
         .unwrap_or_default()
 }
 
 fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
+    use spec::PatternKind;
     let spec = &compiled.spec;
+    let graph = &compiled.graph;
     let ledger = ledger_destination(spec);
     let packet = active_packet_path(spec);
 
@@ -80,6 +88,7 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
         .bindings
         .laws
         .iter()
+        .filter(|law| graph.is_active(PatternKind::Law, &law.id))
         .map(|law| {
             let (hook, invocation) = match law.id.as_str() {
                 "enforce-file-scope" => (
@@ -105,24 +114,28 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
 
     let patterns = crate::common::pattern_inventory(compiled, &Portable);
 
-    let gate = spec.bindings.gate.as_ref().map(|g| {
-        json!({
-            "id": g.id,
-            "boundary": g.boundary,
-            "bind": g.bind,
-            "requires_obligations": g.requires_obligations,
-            "hook": "hooks/approve_commit.sh",
-            "invokes": format!(
-                "kernel pre-commit --ledger {ledger}{}",
-                g.requires_obligations.iter().map(|o| format!(" --require {o}")).collect::<String>()
-            ),
-        })
-    });
+    let gate = spec
+        .bindings
+        .gate
+        .as_ref()
+        .filter(|g| graph.is_active(PatternKind::Gate, &g.id))
+        .map(|g| {
+            json!({
+                "id": g.id,
+                "boundary": g.boundary,
+                "bind": g.bind,
+                "requires_obligations": g.requires_obligations,
+                "hook": "hooks/approve_commit.sh",
+                "invokes": format!(
+                    "kernel pre-commit --ledger {ledger}{}",
+                    g.requires_obligations.iter().map(|o| format!(" --require {o}")).collect::<String>()
+                ),
+            })
+        });
 
     // The manifest declares the compiled architecture, so it lists only the
     // bindings the composition *activates* — same active set as generation.
-    use spec::PatternKind;
-    let g = &compiled.graph;
+    let g = graph;
     let delegates: Vec<Value> = spec
         .bindings
         .delegates
@@ -167,10 +180,15 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
             "patterns": patterns,
             "laws": laws,
             "gate": gate,
-            "ledger": spec.bindings.ledger.as_ref().map(|l| json!({
-                "destination": l.destination,
-                "redact": l.redact,
-            })),
+            "ledger": spec
+                .bindings
+                .ledger
+                .as_ref()
+                .filter(|_| graph.is_singleton_active(PatternKind::Ledger))
+                .map(|l| json!({
+                    "destination": l.destination,
+                    "redact": l.redact,
+                })),
             "specialists": specialists,
             "delegates": delegates,
             "pipelines": pipelines,
@@ -182,12 +200,18 @@ fn manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     )
 }
 
-fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
+fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
+    let spec = &compiled.spec;
     let ledger = ledger_destination(spec);
     let packet = active_packet_path(spec);
     let mut out = Vec::new();
 
-    for law in &spec.bindings.laws {
+    for law in spec
+        .bindings
+        .laws
+        .iter()
+        .filter(|law| compiled.graph.is_active(spec::PatternKind::Law, &law.id))
+    {
         let (path, body) = match law.id.as_str() {
             "enforce-file-scope" => (
                 "hooks/enforce_file_scope.sh",
@@ -213,7 +237,7 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         });
     }
 
-    let obligations = gate_obligations(spec);
+    let obligations = gate_obligations(compiled);
     if !obligations.is_empty() {
         let requires: String = obligations
             .iter()

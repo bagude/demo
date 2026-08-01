@@ -1,113 +1,113 @@
 {
   "_generated": {
-    "compiler_ref": "sha256:2e5e6c2ee008bf799339fcdcb1218a47dc8b23218ab9d492835cbe3196d0a9f9",
+    "compiler_ref": "sha256:64d0192947cb5db3838c0af621242b534af8fcacffae3d5e39a1957bb7355fc5",
     "from": "harness.patterns.yaml",
     "generator": "harnessc 0.1.0",
     "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
     "ir_schema": "2",
     "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
-    "playbook_ref": "sha256:ce27daccc6adc1bb666a2031f051149c0465b563a7fd2d1b7a77ee11eb412835",
+    "playbook_ref": "sha256:6404c65bdec1496c3817bb20aee3b9002af2d5cfea728ced0fecdf0fae92285b",
     "source_ref": "sha256:d0a4e9e22a20d2681b56fb179f56f782d292e1b2f012514bc226b14eec30b9d2"
   },
   "files": [
     {
-      "digest": "sha256:77f5ee9b1e290cfd56b1fef491b8f8e79b70694094d2eeddf301f98ae45f70ce",
+      "digest": "sha256:e0de8e1be75ff13bfab0d0ef871b47e66c5a01ef02cbb89beede3b890f7aad20",
       "mode": "0644",
       "path": ".claude/commands/pick-task.md",
       "type": "regular"
     },
     {
-      "digest": "sha256:e00eade0d681ff0fc60ab89e11df0e5ded7fe4a47ef7bff1cd802157036a5132",
+      "digest": "sha256:2e72ccf1209e740d8201931ac0d3291608ae706c50f8256714d6a844fdd53403",
       "mode": "0644",
       "path": ".claude/settings.json",
       "type": "regular"
     },
     {
-      "digest": "sha256:13d7cc6a741e562d4a08bad9201e077b132d588bf1dbb0a432c77f30a967cc9e",
+      "digest": "sha256:d6235f7c0003cffca67bb94b18d59ff13b171a00f30e9e3a82f974db9dd55e4f",
       "mode": "0644",
       "path": "CLAUDE.md",
       "type": "regular"
     },
     {
-      "digest": "sha256:9ee1ec2a14585e1158c2b1fac66d698c3464f33b72f40a6da3a1dca1feaeaf88",
+      "digest": "sha256:501714029894b51c9c4db8da63bb29c66b8453701442b80be2409189be64fdff",
       "mode": "0644",
       "path": "checkpoints/.gitkeep",
       "type": "regular"
     },
     {
-      "digest": "sha256:9ee1ec2a14585e1158c2b1fac66d698c3464f33b72f40a6da3a1dca1feaeaf88",
+      "digest": "sha256:501714029894b51c9c4db8da63bb29c66b8453701442b80be2409189be64fdff",
       "mode": "0644",
       "path": "evidence/.gitkeep",
       "type": "regular"
     },
     {
-      "digest": "sha256:f009136f1e849c367cd50025ca54f43e0d8160c44029426f233eb46b8da99cc7",
+      "digest": "sha256:02907c6904543ecf2a9fafb09ff0dbea892443606879f36d6c70bd14b8404e2c",
       "mode": "0644",
       "path": "harness/README.md",
       "type": "regular"
     },
     {
-      "digest": "sha256:e5cf9869b0c11ec9d9d4ac266bcd723bf3168e787aee75cb91219e70d235f10e",
+      "digest": "sha256:c49437506eb4742fc5c8466b95c0e85303b081a92b3c8c28f8fbd6ff24897683",
       "mode": "0644",
       "path": "harness/enforcement.protected",
       "type": "regular"
     },
     {
-      "digest": "sha256:2eff1346ec0c105ed8def60453b859fbd9b934a621c49b25b1f2ef742e816f00",
+      "digest": "sha256:84bf436b500fdc301d94f8405f0807b76ab35db31e6d8062d3d32586b9521cc0",
       "mode": "0644",
       "path": "harness/gates/approve-commit.json",
       "type": "regular"
     },
     {
-      "digest": "sha256:dc70063c4fb504340c7fd26097a7e7ab6c2fac0eda9e9b66290189fc8ede8cf1",
+      "digest": "sha256:b8fad1d3a9b3e6e79faeab19878e8692bb185e4b3257759e91c17623d0c437d4",
       "mode": "0755",
       "path": "harness/hooks/approve_commit.sh",
       "type": "regular"
     },
     {
-      "digest": "sha256:7e9396b56004e0d3077ade288b528f6848c76229ef53b3ce3b4dec3f5696dc2d",
+      "digest": "sha256:414c3616d0dadd7a787be7de550524c5c45c7f48ecb79924c143069daf884c8c",
       "mode": "0755",
       "path": "harness/hooks/enforce_file_scope.sh",
       "type": "regular"
     },
     {
-      "digest": "sha256:f8765d607fce67f69c0a8c6a400f382f53cf80e3be0e19f3ed270f50b5e323aa",
+      "digest": "sha256:2d333600fb27f3acd035cc73c3fcbf8e90112b9e7ff8695c1023f0f21766675a",
       "mode": "0755",
       "path": "harness/hooks/protect_enforcement.sh",
       "type": "regular"
     },
     {
-      "digest": "sha256:eaae2ab32216bdb74e229d7c1e200fb6150dde92738f85dffbb59dd8bffde802",
+      "digest": "sha256:f09722f97de8ca8a6d6c20039991de3604c9f2bdf77a7ba855952d3136e56a99",
       "mode": "0755",
       "path": "harness/hooks/require_validation.sh",
       "type": "regular"
     },
     {
-      "digest": "sha256:51f8b3d4b631ee44a6a1c26ade21ccaeacb98a1fc078580f2d9039a925411f1f",
+      "digest": "sha256:5116ad768dd5ff41b2d50b0c33818de535c9ad25b07c05c0f8dc3a87cc94b645",
       "mode": "0644",
       "path": "harness/playbook.json",
       "type": "regular"
     },
     {
-      "digest": "sha256:94a3ccc7d72c70136dfb22c8f760d646ace893c37f3c0c16439d4645b8f9e14c",
+      "digest": "sha256:4acdb8972032d1230075b4bda7198c4f1996deabd8922e63a6df66ead7946818",
       "mode": "0644",
       "path": "harness/schemas/checkpoint.schema.json",
       "type": "regular"
     },
     {
-      "digest": "sha256:ac3f853925f681ebf7f9c841ae46b45783c442340df4c5b8f3049e28552f9812",
+      "digest": "sha256:b36df1264cea982f4c98b6804262e6d756760d88cc8cf8613ee684fef159606f",
       "mode": "0644",
       "path": "harness/schemas/event.schema.json",
       "type": "regular"
     },
     {
-      "digest": "sha256:c04be6dd3458cc127ad42d53b3185fe29d5604f81d42afe190d12a7643844164",
+      "digest": "sha256:2e97d504aa22a34ae4c91a16e6de93973649b414edd4e838c5dccceac868052f",
       "mode": "0644",
       "path": "harness/schemas/task-packet.schema.json",
       "type": "regular"
     },
     {
-      "digest": "sha256:9ee1ec2a14585e1158c2b1fac66d698c3464f33b72f40a6da3a1dca1feaeaf88",
+      "digest": "sha256:501714029894b51c9c4db8da63bb29c66b8453701442b80be2409189be64fdff",
       "mode": "0644",
       "path": "tasks/.gitkeep",
       "type": "regular"

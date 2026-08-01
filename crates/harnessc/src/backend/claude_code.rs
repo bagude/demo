@@ -7,7 +7,7 @@
 use serde_json::{json, Value};
 use spec::model::{
     DelegateBinding, GateBinding, HiveBinding, LawBinding, LawEvent, PipelineBinding, PortBinding,
-    SpecFile, SpecialistBinding,
+    SpecialistBinding,
 };
 use spec::{Binding, CompiledSpec};
 
@@ -50,13 +50,25 @@ impl Backend for ClaudeCode {
     }
 
     fn generate(&self, compiled: &CompiledSpec, refs: &Refs) -> Generated {
+        // Membership is the resolved graph's call: every component-specific
+        // artifact below is emitted only for a component the graph activates.
+        // The bindings block supplies *configuration* (paths, names, caps);
+        // it never decides *presence* — a binding the composition ignores is
+        // not architecture, and generation must not resurrect it.
+        use spec::PatternKind;
         let spec = &compiled.spec;
+        let g = &compiled.graph;
         let prov = Prov { refs };
         let mut files = Vec::new();
 
-        files.push(claude_md(&prov, spec));
-        files.push(settings_json(&prov, spec));
-        if let Some(verb) = &spec.bindings.verb {
+        files.push(claude_md(&prov, compiled));
+        files.push(settings_json(&prov, compiled));
+        if let Some(verb) = spec
+            .bindings
+            .verb
+            .as_ref()
+            .filter(|_| g.is_singleton_active(PatternKind::Verb))
+        {
             files.push(command_md(
                 &prov,
                 &verb.command,
@@ -65,15 +77,20 @@ impl Backend for ClaudeCode {
                 &verb.produces,
             ));
         }
-        files.extend(schema_files(&prov, spec));
-        files.extend(hook_files(&prov, spec));
+        files.extend(schema_files(&prov, compiled));
+        files.extend(hook_files(&prov, compiled));
         files.push(protected_file(&prov));
-        if let Some(gate) = &spec.bindings.gate {
+        if let Some(gate) = spec
+            .bindings
+            .gate
+            .as_ref()
+            .filter(|gate| g.is_active(PatternKind::Gate, &gate.id))
+        {
             files.push(gate_file(&prov, gate));
         }
         files.extend(pattern_files(&prov, compiled));
         files.push(playbook_manifest(&prov, compiled));
-        for dir in runtime_dirs(spec) {
+        for dir in runtime_dirs(compiled) {
             files.push(prov.gitkeep(&dir));
         }
         files.push(harness_readme(&prov, refs));
@@ -96,16 +113,38 @@ fn hook_path(law: &LawBinding) -> String {
         .unwrap_or_else(|| format!("harness/hooks/{}.sh", law.id.replace('-', "_")))
 }
 
-/// The obligations the commit Gate enforces, if any.
-fn gate_obligations(spec: &SpecFile) -> Vec<String> {
-    spec.bindings
+/// The Laws that are part of the compiled architecture — active in the
+/// resolved graph (surface occurrence, `uses` edge, or `always_on`). The
+/// checker rejects a bound-but-inactive enforcement Law outright, so for a
+/// valid spec this filter drops nothing; it exists so generation *derives*
+/// from the resolved architecture instead of restating the checker's theorem.
+fn active_laws(compiled: &CompiledSpec) -> Vec<&LawBinding> {
+    compiled
+        .spec
+        .bindings
+        .laws
+        .iter()
+        .filter(|law| compiled.graph.is_active(spec::PatternKind::Law, &law.id))
+        .collect()
+}
+
+/// The obligations the commit Gate enforces — only when the Gate itself is an
+/// active component of the resolved architecture.
+fn gate_obligations(compiled: &CompiledSpec) -> Vec<String> {
+    compiled
+        .spec
+        .bindings
         .gate
         .as_ref()
+        .filter(|g| compiled.graph.is_active(spec::PatternKind::Gate, &g.id))
         .map(|g| g.requires_obligations.clone())
         .unwrap_or_default()
 }
 
-fn claude_md(prov: &Prov, spec: &SpecFile) -> GenFile {
+fn claude_md(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
+    use spec::PatternKind;
+    let spec = &compiled.spec;
+    let g = &compiled.graph;
     let mut body = String::new();
     body.push_str(&prov.md_header());
     body.push('\n');
@@ -126,10 +165,11 @@ fn claude_md(prov: &Prov, spec: &SpecFile) -> GenFile {
     );
 
     body.push_str("## Laws in force\n\n");
-    if spec.bindings.laws.is_empty() {
+    let laws = active_laws(compiled);
+    if laws.is_empty() {
         body.push_str("_None declared._\n\n");
     } else {
-        for law in &spec.bindings.laws {
+        for law in laws {
             let enforcement = match law.id.as_str() {
                 "enforce-file-scope" => {
                     "**enforced** — the kernel blocks edits outside the packet's write scope; \
@@ -152,7 +192,12 @@ fn claude_md(prov: &Prov, spec: &SpecFile) -> GenFile {
         body.push('\n');
     }
 
-    if let Some(gate) = &spec.bindings.gate {
+    if let Some(gate) = spec
+        .bindings
+        .gate
+        .as_ref()
+        .filter(|gate| g.is_active(PatternKind::Gate, &gate.id))
+    {
         body.push_str("## Gate\n\n");
         body.push_str(&format!(
             "`{}` halts at **{}**. Approval binds to: {}. A change to the action \
@@ -170,7 +215,12 @@ fn claude_md(prov: &Prov, spec: &SpecFile) -> GenFile {
         }
     }
 
-    if let Some(ledger) = &spec.bindings.ledger {
+    if let Some(ledger) = spec
+        .bindings
+        .ledger
+        .as_ref()
+        .filter(|_| g.is_singleton_active(PatternKind::Ledger))
+    {
         body.push_str("## Ledger\n\n");
         body.push_str(&format!(
             "Governed actions and decisions are appended to `{}`. Redacted: {}.\n\n",
@@ -192,11 +242,11 @@ fn claude_md(prov: &Prov, spec: &SpecFile) -> GenFile {
     }
 }
 
-fn settings_json(prov: &Prov, spec: &SpecFile) -> GenFile {
+fn settings_json(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     let mut pre: Vec<Value> = Vec::new();
     let mut post: Vec<Value> = Vec::new();
 
-    for law in &spec.bindings.laws {
+    for law in active_laws(compiled) {
         let entry = json!({
             "matcher": tool_matcher(&law.applies_to),
             "hooks": [ { "type": "command", "command": hook_path(law) } ]
@@ -207,10 +257,11 @@ fn settings_json(prov: &Prov, spec: &SpecFile) -> GenFile {
         }
     }
 
-    // Bash pre-tool interceptors: self-protection always, plus the commit Gate
-    // when the harness has obligations to discharge.
+    // Bash pre-tool interceptors: self-protection always (it guards the
+    // Playbook itself, not any one component), plus the commit Gate when an
+    // active Gate has obligations to discharge.
     let mut bash_hooks = vec![json!({ "type": "command", "command": PROTECT_HOOK })];
-    if !gate_obligations(spec).is_empty() {
+    if !gate_obligations(compiled).is_empty() {
         bash_hooks.push(json!({ "type": "command", "command": APPROVE_COMMIT_HOOK }));
     }
     pre.push(json!({ "matcher": "Bash", "hooks": bash_hooks }));
@@ -257,12 +308,13 @@ fn command_md(prov: &Prov, path: &str, name: &str, accepts: &str, produces: &str
     }
 }
 
-fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
+fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
+    let spec = &compiled.spec;
     let ledger = ledger_destination(spec);
     let packet = active_packet_path(spec);
     let mut out = Vec::new();
 
-    for law in &spec.bindings.laws {
+    for law in active_laws(compiled) {
         let path = hook_path(law);
         let body = match law.id.as_str() {
             "enforce-file-scope" => format!(
@@ -287,8 +339,8 @@ fn hook_files(prov: &Prov, spec: &SpecFile) -> Vec<GenFile> {
         });
     }
 
-    // The commit-boundary Gate hook.
-    let obligations = gate_obligations(spec);
+    // The commit-boundary Gate hook (only for an active Gate).
+    let obligations = gate_obligations(compiled);
     if !obligations.is_empty() {
         let requires: String = obligations
             .iter()
@@ -701,6 +753,79 @@ platform: { type: claude-code }
         );
         let mcp = &find(&g, ".mcp.json").content;
         assert!(!mcp.contains("deploy-prod"), "inactive port server absent");
+    }
+
+    #[test]
+    fn bound_but_unreferenced_singletons_generate_no_artifacts() {
+        // The stronger invariant: every component-specific artifact must be
+        // reachable from an active component. Verb and Intake are not
+        // enforcement (so the checker only warns), but a Verb the composition
+        // never places must not become a live command, and an Intake the
+        // composition never places must not scaffold storage — the backend
+        // consults the resolved graph, never raw binding presence.
+        let unreferenced = r#"
+harness: { name: n, version: 0.1.0 }
+composition:
+  expression: "(Port[staging] within Sandbox) -> Gate + Law + Ledger"
+bindings:
+  sandbox: { workspace: branch, lineage: [source_revision, sandbox_id, merge_revision] }
+  intake: { task_schema: harness/schemas/task-packet.schema.json, storage: tasks/ }
+  verb: { name: deploy, command: .claude/commands/deploy.md, accepts: TaskPacket, produces: Result }
+  laws:
+    - { id: enforce-file-scope, kind: guard, event: pre_tool, applies_to: [edit] }
+  ports:
+    - { id: staging, server: deploy, write: [release], write_guard: enforce-file-scope, sandboxed: propose }
+  gate:
+    id: g
+    boundary: before_deploy
+    checkpoint_schema: harness/schemas/checkpoint.schema.json
+    bind: [action_hash, repository_revision, approver]
+  ledger:
+    event_schema: harness/schemas/event.schema.json
+    destination: evidence/events.jsonl
+    redact: [secrets, credentials]
+platform: { type: claude-code }
+"#;
+        let compiled = spec::compile(unreferenced, &ClaudeCode).expect("compiles with warnings");
+        let warnings: Vec<String> = compiled.warnings.iter().map(|w| w.to_string()).collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("bound but never appears")),
+            "the exclusion is warned about, never silent: {warnings:?}"
+        );
+        let g = ClaudeCode.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        );
+        let paths: Vec<&str> = g.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            !paths.contains(&".claude/commands/deploy.md"),
+            "an unplaced Verb must not become a live command"
+        );
+        assert!(
+            !paths.contains(&"harness/schemas/task-packet.schema.json"),
+            "an unplaced Intake emits no schema"
+        );
+        assert!(
+            !paths.contains(&"tasks/.gitkeep"),
+            "an unplaced Intake scaffolds no storage"
+        );
+
+        // The same bindings, placed in the composition: all three appear.
+        let referenced = unreferenced.replace(
+            "\"(Port[staging] within Sandbox) -> Gate + Law + Ledger\"",
+            "\"Intake -> Verb + (Port[staging] within Sandbox) -> Gate + Law + Ledger\"",
+        );
+        let compiled = spec::compile(&referenced, &ClaudeCode).expect("compiles");
+        let g = ClaudeCode.generate(
+            &compiled,
+            &crate::common::refs(&compiled, "sha256:test", "test"),
+        );
+        let paths: Vec<&str> = g.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&".claude/commands/deploy.md"));
+        assert!(paths.contains(&"harness/schemas/task-packet.schema.json"));
+        assert!(paths.contains(&"tasks/.gitkeep"));
     }
 
     #[test]

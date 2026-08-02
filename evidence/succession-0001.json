@@ -1,0 +1,11 @@
+{
+  "old_runtime_ref": "sha256:02a6c163f7d4f024afd291d6e1a2e96beec1a1ad8ddc02a098cba1e8c6da6e93",
+  "old_ledger_head": "sha256:fd5777db12ff7e2c6a5a4640e1a509666815cc4d6d1f5a6b8fd9be2625d86b91",
+  "maintenance_task_id": "a6b89a7737f0",
+  "reason": "seat the succession-protocol kernel: the prior runtime could not represent a governed replacement of the governor (no succession events, no boundary attestation) \u2014 the defect class the first self-trial exposed",
+  "patch_ref": "git:ceeb4ae707cb8263b4adc1844d77488cdb54432a",
+  "conformance_ref": "sha256:1ae2b1c63821cde931a9ed8a9e44f43024c9cb0581075b0630da52b386877039",
+  "new_kernel_ref": "sha256:30558d5234307fa0cd4c60744f92eac79e7fa62c95b41696f49a20028d91e88c",
+  "new_runtime_ref": "sha256:c70149d829b2ba1572a16465cb007c1cf22af73867f2b728904f973c69e08ab4",
+  "disarm_recorded": false
+}

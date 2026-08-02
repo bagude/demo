@@ -244,6 +244,33 @@ One earlier boundary (record 17, the first trial-era kernel repair) remains
 and the protocol does not manufacture governance retroactively. The warning
 is the honest scar.
 
+## The first normal-mode succession
+
+`succession-0002`
+([`evidence/succession-0002.json`](../evidence/succession-0002.json),
+ceremony packet `a3e9c16504c2`, maintenance packet `bf3646c39e39`) seated
+the boundary-enforcing kernel under the invariant it introduced — the first
+transfer of authority held to the full discipline, with no exception:
+
+1. the active runtime `c70149d8…` recorded `succession.disarm` as its
+   **exact final ledger record** (head `7149b7f6…`);
+2. the manifest bound that head, both task authorities, the patch
+   (`git:c7e26b1f…`), the conformance suite digest, and the successor
+   identities, with `transition_mode: normal`;
+3. the gate ran **without** `--ledger` — the ceremony appended nothing
+   between head and activation;
+4. the approval was signed by `bagude` and re-verified against the
+   registry before activation;
+5. the candidate ran the six-case conformance matrix live, self-attested
+   its `kernel_ref` and `runtime_ref` against the approved manifest, and
+   activated **adjacent to the head**: the activation record's `prev` IS
+   the disarm digest;
+6. the retired kernel's binary was replaced immediately after activation.
+
+The verifier classifies the boundary at record 165
+`VALID (normal boundary invariant)` — the first handover in this ledger's
+history that is neither a scar nor an exception.
+
 ## Deliberate non-goals
 
 - **Self-hosted bootstrap proof.** The successor is validated by tests the

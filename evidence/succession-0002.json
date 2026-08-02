@@ -1,0 +1,13 @@
+{
+  "transition_mode": "normal",
+  "old_runtime_ref": "sha256:c70149d829b2ba1572a16465cb007c1cf22af73867f2b728904f973c69e08ab4",
+  "old_ledger_head": "sha256:7149b7f65cc728b479a3f1d1b0f95ebbb6c843ed2b287453b522aeb68703d124",
+  "maintenance_task_id": "bf3646c39e39",
+  "ceremony_task_id": "a3e9c16504c2",
+  "reason": "seat the boundary-enforcing kernel: the active runtime cannot enforce candidate mode or the succession boundary invariant",
+  "patch_ref": "git:c7e26b1fa0ff1ca7f500f0ceb52fbbf6f2b0274d",
+  "conformance_ref": "sha256:1ae2b1c63821cde931a9ed8a9e44f43024c9cb0581075b0630da52b386877039",
+  "new_kernel_ref": "sha256:9000ecf8b23d358934902dea93fce3325c04623002002e85eb737bfd54c18292",
+  "new_runtime_ref": "sha256:bb23ce832511dc46e8221369762d4428f8a0cfc149a2e851cbaa6feff1b89f23",
+  "disarm_recorded": true
+}

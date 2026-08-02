@@ -119,12 +119,19 @@ The trial produced five findings in its first thirty minutes armed — none
 of which any mechanical test had caught, which is precisely the argument
 for running it.
 
-- **F1 — Overbroad Bash matcher (false positive, fail-safe direction).**
+- **F1 — Overbroad Bash matcher (false positive, fail-safe direction;
+  upgraded during the trial's own closing commit).**
   `bash_hits_protected` substring-matches protected entries against the
-  *entire command text*: a heredoc whose prose contained the word "harness"
-  plus a `>` redirect was blocked as a destructive write to `harness/`.
-  Enforcement erred toward blocking — the right direction — but the matcher
-  should judge command *targets*, not raw text. Roadmap.
+  *entire command text*, and treats any `>` character as the destructive
+  marker: a heredoc whose prose contained the word "harness" plus a
+  redirect was blocked as a destructive write to `harness/`. Worse,
+  discovered while committing this very trial: the standard attribution
+  trailer (`<noreply@anthropic.com>`) supplies the `>`, so **any commit
+  whose message merely mentions the protected directory's name is
+  refused** — the trial's closing commit had to be worded around its own
+  subject matter. Enforcement erred toward blocking — the right
+  direction — but the matcher must judge command *targets*, not raw
+  text. Roadmap, priority raised.
 - **F2 — Activation rides the B2 gap.** `tasks/active.json` is written by
   shell, i.e. through exactly the unguarded channel B2 demonstrates. In
   this trial the subject activated its own packet — meaning scope was

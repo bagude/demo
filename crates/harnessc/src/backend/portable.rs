@@ -42,7 +42,7 @@ impl Backend for Portable {
 
         files.push(manifest(&prov, compiled));
         files.extend(hook_files(&prov, compiled));
-        files.push(protected_file(&prov));
+        files.push(protected_file(&prov, compiled));
         // Schemas placed under a flat schemas/ dir — the backend owns layout.
         // These three describe the KERNEL's own types (invariant across
         // compositions), not any one component, so they are unconditional —
@@ -222,7 +222,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
             "enforce-file-scope" => (
                 "hooks/enforce_file_scope.sh",
                 format!(
-                    "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope (with self-protection).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool --packet \"${{ACTIVE_PACKET:-{packet}}}\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --protected \"enforcement.protected\"\n",
+                    "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope (with self-protection).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool --packet \"${{ACTIVE_PACKET:-{packet}}}\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unbound-$PPID}}\" --playbook-ref \"{playbook}\" --protected \"enforcement.protected\"\n",
                     header = prov.hash_header(),
                     playbook = prov.refs.playbook_ref,
                 ),
@@ -230,15 +230,18 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
             "require-validation" => (
                 "hooks/require_validation.sh",
                 format!(
-                    "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit (scope '{scope}').\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --scope {scope}{packet_arg}\n",
+                    "#!/usr/bin/env bash\n{header}# Obligation Law: record that validation is owed after an edit (scope '{scope}').\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unbound-$PPID}}\" --playbook-ref \"{playbook}\" --scope {scope}{packet_arg}\n",
                     scope = law.scope.as_str(),
-                    packet_arg = match law.scope {
-                        spec::model::ObligationScope::Task =>
-                            format!(" --packet \"${{ACTIVE_PACKET:-{packet}}}\""),
-                        spec::model::ObligationScope::Instance =>
-                            " --instance \"${HARNESS_INSTANCE:?instance-scoped obligation requires HARNESS_INSTANCE}\""
-                                .to_string(),
-                        _ => String::new(),
+                    // Every obligation event names the packet it served
+                    // (identity binding); the scope key stays per-scope.
+                    packet_arg = {
+                        let packet_flag = format!(" --packet \"${{ACTIVE_PACKET:-{packet}}}\"");
+                        match law.scope {
+                            spec::model::ObligationScope::Instance => format!(
+                                "{packet_flag} --instance \"${{HARNESS_INSTANCE:?instance-scoped obligation requires HARNESS_INSTANCE}}\""
+                            ),
+                            _ => packet_flag,
+                        }
                     },
                     header = prov.hash_header(),
                     playbook = prov.refs.playbook_ref,
@@ -261,7 +264,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         out.push(GenFile {
             path: "hooks/approve_commit.sh".to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding, each at\n# its declared scope. Every commit evaluation is recorded to the Ledger.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\" --packet \"${{ACTIVE_PACKET:-{packet}}}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block a git commit while a required obligation is outstanding, each at\n# its declared scope. Every commit evaluation is recorded to the Ledger.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unbound-$PPID}}\" --playbook-ref \"{playbook}\" --packet \"${{ACTIVE_PACKET:-{packet}}}\"{requires}\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
             ),
@@ -272,7 +275,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
     out.push(GenFile {
         path: "hooks/protect_enforcement.sh".to_string(),
         content: format!(
-            "#!/usr/bin/env bash\n{header}# Self-protection: block destructive Bash against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash --packet \"${{ACTIVE_PACKET:-{packet}}}\" --protected \"enforcement.protected\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unknown}}\" --playbook-ref \"{playbook}\"\n",
+            "#!/usr/bin/env bash\n{header}# Self-protection: block destructive Bash against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash --packet \"${{ACTIVE_PACKET:-{packet}}}\" --protected \"enforcement.protected\" --ledger \"{ledger}\" --run-id \"${{RUN_ID:-unbound-$PPID}}\" --playbook-ref \"{playbook}\"\n",
             header = prov.hash_header(),
             playbook = prov.refs.playbook_ref,
         ),
@@ -280,13 +283,13 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
     out
 }
 
-fn protected_file(prov: &Prov) -> GenFile {
+fn protected_file(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     let mut body = prov.hash_header();
     body.push_str("# Protected enforcement artifacts (portable layout). A write requires a task\n");
     body.push_str(
         "# packet with amends_enforcement = true (an explicit, auditable Intake grant).\n",
     );
-    for p in [
+    let mut prefixes: Vec<String> = [
         "harness.patterns.yaml",
         "hooks/",
         "schemas/",
@@ -294,8 +297,19 @@ fn protected_file(prov: &Prov) -> GenFile {
         // The bundle inventory: tampering it would hide an obsolete artifact
         // from verification, so it is protected like the hooks themselves.
         "bundle.manifest.json",
-    ] {
-        body.push_str(p);
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    // The spec-declared TCB (kernel source, compiler source, lock) extends
+    // the generated set — see the claude-code backend for the rationale.
+    for extra in &compiled.spec.harness.protected {
+        if !prefixes.contains(extra) {
+            prefixes.push(extra.clone());
+        }
+    }
+    for p in prefixes {
+        body.push_str(&p);
         body.push('\n');
     }
     GenFile {

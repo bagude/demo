@@ -234,6 +234,7 @@ fn record(
     evidence_refs: Vec<String>,
     playbook_ref: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let playbook: String = playbook_ref.unwrap_or_default().into();
     let event = Event {
         run_id: run_id.into(),
         task_id: None,
@@ -247,7 +248,8 @@ fn record(
         output_refs,
         decision,
         evidence_refs,
-        playbook_ref: playbook_ref.unwrap_or_default().into(),
+        runtime_ref: kernel::runtime_ref(&playbook),
+        playbook_ref: playbook,
         kernel_ref: kernel::kernel_ref(),
         attempt_id: None,
     };

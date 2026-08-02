@@ -233,6 +233,7 @@ mod tests {
             evidence_refs: vec![],
             playbook_ref: String::new(),
             kernel_ref: String::new(),
+            runtime_ref: String::new(),
             attempt_id: None,
         }
     }

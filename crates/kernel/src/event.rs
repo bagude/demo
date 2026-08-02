@@ -166,6 +166,17 @@ pub struct Event {
     /// state — a record this kernel did not write.
     #[serde(default)]
     pub kernel_ref: String,
+    /// Digest of the **runtime constitution** as one identity:
+    /// `sha256(playbook_ref + kernel_ref + envelope ABI)`, length-prefixed.
+    /// `playbook_ref` names the compiled interpretation and `kernel_ref` the
+    /// enforcement binary, but nothing bound them together — the self-trial
+    /// proved the same playbook can govern two different kernels, and only a
+    /// joint identity makes that a visible partition of history rather than a
+    /// field-diffing exercise. Computed by the kernel at append time
+    /// ([`crate::runtime_ref`]); an empty value is explicit historical/foreign
+    /// state.
+    #[serde(default)]
+    pub runtime_ref: String,
     /// One execution *attempt* of a logical action, distinct from `action_id`,
     /// for replay safety across retries and resumption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -486,6 +497,7 @@ mod tests {
             evidence_refs: vec![],
             playbook_ref: "sha256:spec".into(),
             kernel_ref: "sha256:kernel".into(),
+            runtime_ref: "sha256:runtime".into(),
             attempt_id: None,
         }
     }
@@ -531,7 +543,20 @@ mod tests {
         let back: Event = serde_json::from_str(legacy).unwrap();
         assert!(back.kernel_ref.is_empty());
         assert!(back.playbook_ref.is_empty());
+        assert!(back.runtime_ref.is_empty());
         assert!(back.stage.is_empty(), "pre-protocol records claim no stage");
+    }
+
+    #[test]
+    fn runtime_ref_rides_the_envelope() {
+        // The joint constitutional identity survives a round-trip; a record
+        // without it reads as explicit legacy state (asserted above), never as
+        // an ordinary governed event.
+        let e = event(Decision::Allowed);
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(json.contains("\"runtime_ref\":\"sha256:runtime\""));
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runtime_ref, "sha256:runtime");
     }
 
     #[test]

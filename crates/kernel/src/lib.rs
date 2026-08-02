@@ -112,6 +112,37 @@ pub fn kernel_ref() -> String {
     s
 }
 
+/// The event-envelope ABI this kernel speaks — part of the runtime identity,
+/// because two kernels writing structurally different envelopes are different
+/// governed systems even when their policy logic agrees.
+pub const ENVELOPE_ABI: &str = "harness-event/2";
+
+/// The **runtime constitution** as one digest: the compiled interpretation
+/// (`playbook_ref`), the enforcement implementation ([`kernel_ref`]), and the
+/// envelope ABI, length-prefixed so no boundary rearrangement collides.
+///
+/// The self-trial's central finding made this necessary: the same
+/// `playbook_ref` governed two different kernel implementations across a
+/// mid-trial repair, and only the separately-recorded `kernel_ref` could tell
+/// them apart. `runtime_ref` binds the pair (plus the ABI between them) into
+/// the identity evidence should be partitioned by: a change to *any*
+/// constituent is a new runtime, visible as a segment boundary in the Ledger
+/// rather than a field-diffing exercise.
+pub fn runtime_ref(playbook_ref: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for unit in [playbook_ref, &kernel_ref(), ENVELOPE_ABI] {
+        hasher.update((unit.len() as u64).to_le_bytes());
+        hasher.update(unit.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut s = String::from("sha256:");
+    for b in digest {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 pub use event::{
     line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, Stage, CHAIN_GENESIS,
 };
@@ -122,14 +153,14 @@ pub use hive::{
 };
 pub use identity::{resolve_authority, IdentityError, Registry};
 pub use instance::{InstanceError, InstanceId, PositionRegistry};
-pub use intake::{admit, AdmitError};
-pub use law::{bash_hits_protected, enforce, enforce_file_scope, Enforcement, LawDecision};
+pub use intake::{admit, admit_with_protected, AdmitError};
+pub use law::{bash_hits_protected, enforce, enforce_file_scope, Denial, Enforcement, LawDecision};
 pub use ledger::Ledger;
 pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
 pub use sign::{
     approval_message, reverify_signed_approval, trusted_key_for, Keypair, ReverifyError, SignError,
 };
-pub use validate::{validate, Report, Violation};
+pub use validate::{validate, validate_with_protected, Report, Violation};
 
 #[cfg(test)]
 mod kernel_ref_tests {
@@ -153,6 +184,21 @@ mod kernel_ref_tests {
         let corpus: String = KERNEL_SOURCE.concat();
         assert!(corpus.contains("blocked by enforce-file-scope"));
         assert!(corpus.contains("fn pre_tool"));
+    }
+
+    #[test]
+    fn runtime_ref_binds_playbook_kernel_and_abi_into_one_identity() {
+        let a = runtime_ref("sha256:playbook-a");
+        let b = runtime_ref("sha256:playbook-a");
+        assert_eq!(a, b, "one constitution, one identity");
+        assert!(a.starts_with("sha256:"));
+        // A different compiled interpretation is a different runtime, even
+        // under the same kernel — and vice versa (the kernel side is exercised
+        // by construction: kernel_ref() is folded in).
+        assert_ne!(a, runtime_ref("sha256:playbook-b"));
+        // The joint identity is not either constituent.
+        assert_ne!(a, kernel_ref());
+        assert_ne!(a, "sha256:playbook-a");
     }
 
     #[test]

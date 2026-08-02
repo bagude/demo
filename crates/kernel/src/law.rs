@@ -8,6 +8,54 @@
 
 use crate::packet::TaskPacket;
 
+/// Stable machine-readable denial codes, recorded to the Ledger as
+/// `policy:<code>` on every denial. Human prose explains a refusal to a
+/// person; the code is what lets an analyzer classify a thousand of them
+/// without parsing sentences. Path-shape codes live in
+/// [`crate::fsutil::codes`]; these are the policy-layer ones.
+pub mod codes {
+    /// No admitted packet is active — work has no authorization to be judged
+    /// against.
+    pub const NO_ACTIVE_PACKET: &str = "intake.no_active_packet";
+    /// The target is not in the active packet's write scope.
+    pub const FILE_SCOPE_OUTSIDE: &str = "file_scope.outside";
+    /// The target is a protected enforcement artifact and the packet carries
+    /// no `amends_enforcement` grant.
+    pub const AMENDMENT_REQUIRED: &str = "enforcement.amendment_required";
+    /// The target is a protected enforcement artifact outside the packet's
+    /// write scope entirely.
+    pub const PROTECTED_OUT_OF_SCOPE: &str = "enforcement.protected_out_of_scope";
+    /// A destructive command would touch a protected enforcement artifact.
+    pub const PROTECTED_DESTRUCTIVE: &str = "enforcement.protected_destructive";
+    /// A required obligation is still outstanding at a gate.
+    pub const OBLIGATION_OUTSTANDING: &str = "obligation.outstanding";
+    /// The evaluating run carries no real identity (the legacy `unknown`
+    /// fallback); run-scoped debt cannot be attributed, so the gate fails
+    /// closed.
+    pub const RUN_UNBOUND: &str = "identity.run_unbound";
+    /// A Hive spawn was refused (depth, budget, contract, or conflict).
+    pub const HIVE_REFUSED: &str = "hive.refused";
+    /// A Hive settlement was refused (unknown reservation or overspend).
+    pub const HIVE_SETTLEMENT_REFUSED: &str = "hive.settlement_refused";
+}
+
+/// A refusal with both faces: the stable `code` an analyzer matches on and
+/// the human-readable `reason` a person acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Denial {
+    pub code: &'static str,
+    pub reason: String,
+}
+
+impl Denial {
+    pub fn new(code: &'static str, reason: impl Into<String>) -> Self {
+        Denial {
+            code,
+            reason: reason.into(),
+        }
+    }
+}
+
 /// The verdict of a Guard Law on a proposed transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LawDecision {
@@ -55,8 +103,8 @@ pub enum Enforcement {
     /// An in-scope write to a protected enforcement artifact, explicitly
     /// granted via `amends_enforcement` — allowed, but recorded distinctly.
     AllowAmendment,
-    /// Rejected, with a reason.
-    Deny(String),
+    /// Rejected, with a stable code and a human-readable reason.
+    Deny(Denial),
 }
 
 /// Whether `path` is a protected enforcement artifact.
@@ -81,8 +129,11 @@ pub fn enforce(packet: &TaskPacket, path: &str, protected: &[String]) -> Enforce
     // Refuse a path that is absolute or escapes the workspace before any scope
     // reasoning — a traversal must never be able to reach a protected artifact.
     if crate::packet::normalize_components(path).is_none() {
-        return Enforcement::Deny(format!(
-            "'{path}' is absolute or escapes the workspace root; such paths are never authorized"
+        return Enforcement::Deny(Denial::new(
+            crate::fsutil::codes::PATH_INVALID,
+            format!(
+                "'{path}' is absolute or escapes the workspace root; such paths are never authorized"
+            ),
         ));
     }
     verdict(
@@ -115,7 +166,7 @@ pub fn enforce_at(
 ) -> Enforcement {
     let canonical = match crate::fsutil::canonical_workspace_rel(root, path) {
         Ok(c) => c,
-        Err(reason) => return Enforcement::Deny(reason),
+        Err((code, reason)) => return Enforcement::Deny(Denial::new(code, reason)),
     };
     let lexical: String = crate::packet::normalize_components(path)
         .unwrap_or_default()
@@ -139,22 +190,31 @@ fn verdict(packet: &TaskPacket, path: &str, in_scope: bool, hit_protected: bool)
         if in_scope && packet.amends_enforcement {
             Enforcement::AllowAmendment
         } else if in_scope {
-            Enforcement::Deny(format!(
-                "'{path}' is an enforcement artifact; editing it requires a task packet with \
-                 amends_enforcement = true (an explicit, auditable grant at Intake)"
+            Enforcement::Deny(Denial::new(
+                codes::AMENDMENT_REQUIRED,
+                format!(
+                    "'{path}' is an enforcement artifact; editing it requires a task packet with \
+                     amends_enforcement = true (an explicit, auditable grant at Intake)"
+                ),
             ))
         } else {
-            Enforcement::Deny(format!(
-                "'{path}' is a protected enforcement artifact and is not in the packet's write scope"
+            Enforcement::Deny(Denial::new(
+                codes::PROTECTED_OUT_OF_SCOPE,
+                format!(
+                    "'{path}' is a protected enforcement artifact and is not in the packet's write scope"
+                ),
             ))
         }
     } else if in_scope {
         Enforcement::Allow
     } else {
-        Enforcement::Deny(format!(
-            "'{path}' is not in the write scope of task packet '{}'; only files the packet lists \
-             with access = \"write\" may be edited",
-            packet.title
+        Enforcement::Deny(Denial::new(
+            codes::FILE_SCOPE_OUTSIDE,
+            format!(
+                "'{path}' is not in the write scope of task packet '{}'; only files the packet \
+                 lists with access = \"write\" may be edited",
+                packet.title
+            ),
         ))
     }
 }
@@ -226,7 +286,7 @@ mod tests {
         let mut p = packet();
         p.files.push(FileScope::write(".claude/settings.json"));
         let d = enforce(&p, ".claude/settings.json", &protected());
-        assert!(matches!(d, Enforcement::Deny(_)));
+        assert!(matches!(&d, Enforcement::Deny(den) if den.code == codes::AMENDMENT_REQUIRED));
     }
 
     #[test]
@@ -258,7 +318,12 @@ mod tests {
             "src/../harness/hooks/enforce_file_scope.sh",
             &protected(),
         );
-        assert!(matches!(d, Enforcement::Deny(reason) if reason.contains("escapes the workspace")));
+        assert!(matches!(
+            &d,
+            Enforcement::Deny(den)
+                if den.code == crate::fsutil::codes::PATH_INVALID
+                    && den.reason.contains("escapes the workspace")
+        ));
     }
 
     #[cfg(unix)]
@@ -296,7 +361,7 @@ mod tests {
             .unwrap();
             let d = enforce_at(ws.path(), &scoped("src/"), "src/guard.sh", &protected());
             assert!(
-                matches!(&d, Enforcement::Deny(r) if r.contains("enforcement artifact")),
+                matches!(&d, Enforcement::Deny(r) if r.reason.contains("enforcement artifact")),
                 "{d:?}"
             );
         }
@@ -308,7 +373,12 @@ mod tests {
             symlink(outside.path(), ws.path().join("src/out")).unwrap();
             let d = enforce_at(ws.path(), &scoped("src/"), "src/out/x.rs", &protected());
             assert!(
-                matches!(&d, Enforcement::Deny(r) if r.contains("outside the workspace")),
+                matches!(
+                    &d,
+                    Enforcement::Deny(r)
+                        if r.code == crate::fsutil::codes::PATH_SYMLINK_ESCAPE
+                            && r.reason.contains("outside the workspace")
+                ),
                 "{d:?}"
             );
         }
@@ -320,7 +390,11 @@ mod tests {
             // Scoped src/ only: the write really lands in docs/, so deny.
             let d = enforce_at(ws.path(), &scoped("src/"), "src/d/notes.md", &protected());
             assert!(
-                matches!(&d, Enforcement::Deny(r) if r.contains("write scope")),
+                matches!(
+                    &d,
+                    Enforcement::Deny(r)
+                        if r.code == codes::FILE_SCOPE_OUTSIDE && r.reason.contains("write scope")
+                ),
                 "{d:?}"
             );
             // Scoped docs/ (the real target): the same write is allowed.
@@ -334,7 +408,12 @@ mod tests {
             symlink(ws.path().join("nowhere"), ws.path().join("src/ghost")).unwrap();
             let d = enforce_at(ws.path(), &scoped("src/"), "src/ghost", &protected());
             assert!(
-                matches!(&d, Enforcement::Deny(r) if r.contains("dangling")),
+                matches!(
+                    &d,
+                    Enforcement::Deny(r)
+                        if r.code == crate::fsutil::codes::PATH_DANGLING_SYMLINK
+                            && r.reason.contains("dangling")
+                ),
                 "{d:?}"
             );
         }

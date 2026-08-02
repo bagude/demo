@@ -148,6 +148,9 @@ fn signed_approval_survives_resume_and_defeats_checkpoint_rewrites() {
         .split("head ")
         .nth(1)
         .expect("head printed")
+        .lines()
+        .next()
+        .expect("head printed")
         .trim()
         .to_string();
     let cp_text = std::fs::read_to_string(&cp_path).unwrap();

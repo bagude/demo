@@ -606,3 +606,31 @@ CI. Remaining on this arc: an **online IdP protocol adapter**
 organizational infrastructure — the offline trust core (authority-signed
 registries with expiry and revocation) exists; and a
 **Python/OpenAI-Agents** back-end behind the same `Binding`.
+
+Hardening from the first **self-hosting trial** (the harness governing work on
+itself) is in. Every denial now carries a stable machine-readable code beside
+its prose (`policy:file_scope.outside`,
+`policy:enforcement.amendment_required`, `policy:intake.no_active_packet`,
+`policy:obligation.outstanding`, …), so a refusal is analyzable without
+parsing sentences. Platform-shaped **absolute paths rebind** to their
+workspace-relative form before policy runs — inside the workspace they are
+judged like any other path (evidence records both spellings), outside it they
+are refused with their own code; the trial's first defect, where every
+platform edit was denied as "absolute", cannot recur. Identity fields are
+real: guard, obligation, and gate events name the **admitted packet**
+(`task_id`), a unique **`attempt_id`** distinguishes retries, `action_id`
+names the logical action rather than the subcommand, and the generated hooks
+derive a per-session run identity (`unbound-$PPID`) instead of the shared
+`unknown` fallback — which the commit gate now **fails closed** on
+(`policy:identity.run_unbound`), since debt that cannot be attributed cannot
+be evaluated. Whether a packet **amends enforcement is derived, not
+declared**: a write scope intersecting the protected set — which the spec
+extends with the workspace's own TCB (`harness.protected`: kernel, compiler,
+lock) — is refused at Intake without the grant. And every event carries
+**`runtime_ref`** = `sha256(playbook_ref + kernel_ref + envelope ABI)`: the
+runtime constitution as one digest, with `kernel ledger verify` reporting
+history as contiguous runtime segments, because the trial proved the same
+playbook can govern two different kernels. The governed *transition* between
+runtimes — disarm, externally authorized repair, conformance, activation, and
+genesis linking — is designed in [`docs/SUCCESSION.md`](SUCCESSION.md) and
+admitted as a pending packet.

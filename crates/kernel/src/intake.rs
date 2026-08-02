@@ -6,7 +6,7 @@
 //! records an unvalidated packet.
 
 use crate::packet::{IntakeRecord, TaskPacket};
-use crate::validate::{validate, Report};
+use crate::validate::Report;
 
 /// Why a packet was refused admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +41,19 @@ impl std::error::Error for AdmitError {}
 /// record is appended. Keeping admission and persistence separate lets the
 /// same logic serve a dry-run `validate` command and a real `submit` command.
 pub fn admit(packet: &TaskPacket, recorded_at: String) -> Result<IntakeRecord, AdmitError> {
-    let report = validate(packet);
+    admit_with_protected(packet, recorded_at, &[])
+}
+
+/// [`admit`], judged against the protected enforcement set: a packet whose
+/// write scope intersects it must carry `amends_enforcement = true`, or it is
+/// refused admission. Whether work amends enforcement is derived from what it
+/// touches — never self-classified by the submitter.
+pub fn admit_with_protected(
+    packet: &TaskPacket,
+    recorded_at: String,
+    protected: &[String],
+) -> Result<IntakeRecord, AdmitError> {
+    let report = crate::validate::validate_with_protected(packet, protected);
     if !report.is_ok() {
         return Err(AdmitError::Invalid(report));
     }
@@ -71,6 +83,24 @@ mod tests {
         let record = admit(&valid(), "2026-07-31T00:00:00Z".into()).unwrap();
         assert_eq!(record.recorded_at, "2026-07-31T00:00:00Z");
         assert_eq!(record.task_id.len(), 12);
+    }
+
+    #[test]
+    fn refuses_an_undeclared_enforcement_amendment() {
+        let protected: Vec<String> = vec!["crates/kernel/".into()];
+        let mut p = valid();
+        p.files.push(FileScope::write("crates/kernel/src/law.rs"));
+        let err =
+            admit_with_protected(&p, "2026-07-31T00:00:00Z".into(), &protected).unwrap_err();
+        let AdmitError::Invalid(report) = err;
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.code == "enforcement.amendment_undeclared"));
+
+        p.amends_enforcement = true;
+        admit_with_protected(&p, "2026-07-31T00:00:00Z".into(), &protected)
+            .expect("the declared amendment is admissible");
     }
 
     #[test]

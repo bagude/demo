@@ -26,8 +26,21 @@ const PROTECTED_FILE: &str = "harness/enforcement.protected";
 
 /// Enforcement artifacts protected from ambient amendment (constitution §4).
 /// These are the paths a compiled claude-code Playbook writes, plus the spec.
-fn protected_prefixes() -> [&'static str; 3] {
-    ["harness.patterns.yaml", ".claude/", "harness/"]
+/// A spec extends the set through `harness.protected` — that is how a
+/// self-hosting workspace declares its trusted computing base (kernel source,
+/// compiler source, dependency lock) rather than leaving TCB membership to a
+/// packet's self-classification.
+fn protected_prefixes(compiled: &CompiledSpec) -> Vec<String> {
+    let mut out: Vec<String> = ["harness.patterns.yaml", ".claude/", "harness/"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    for extra in &compiled.spec.harness.protected {
+        if !out.contains(extra) {
+            out.push(extra.clone());
+        }
+    }
+    out
 }
 
 pub struct ClaudeCode;
@@ -79,7 +92,7 @@ impl Backend for ClaudeCode {
         }
         files.extend(schema_files(&prov, compiled));
         files.extend(hook_files(&prov, compiled));
-        files.push(protected_file(&prov));
+        files.push(protected_file(&prov, compiled));
         if let Some(gate) = spec
             .bindings
             .gate
@@ -320,26 +333,30 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         let path = hook_path(law);
         let body = match law.id.as_str() {
             "enforce-file-scope" => format!(
-                "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope\n# (and protect enforcement artifacts unless amends_enforcement is granted).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --protected \"{protected}\"\n",
+                "#!/usr/bin/env bash\n{header}# Guard Law: block edits outside the active packet's write scope\n# (and protect enforcement artifacts unless amends_enforcement is granted).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-tool \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unbound-$PPID}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --protected \"{protected}\"\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
                 protected = PROTECTED_FILE,
             ),
             "require-validation" => format!(
-                "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit\n# (debt scoped '{scope}', as the spec declares).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --scope {scope}{packet_arg}\n",
+                "#!/usr/bin/env bash\n{header}# Obligation Law: record to the Ledger that validation is owed after an edit\n# (debt scoped '{scope}', as the spec declares).\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" post-tool \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unbound-$PPID}}\" \\\n  --playbook-ref \"{playbook}\" \\\n  --scope {scope}{packet_arg}\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
                 scope = law.scope.as_str(),
-                packet_arg = match law.scope {
-                    spec::model::ObligationScope::Task =>
-                        format!(" \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\""),
-                    // The instance is runtime information only the executing
-                    // occupant knows; the hook requires it from the
-                    // environment rather than inventing one.
-                    spec::model::ObligationScope::Instance =>
-                        " \\\n  --instance \"${HARNESS_INSTANCE:?instance-scoped obligation requires HARNESS_INSTANCE}\""
-                            .to_string(),
-                    _ => String::new(),
+                // Every obligation event names the packet it served (identity
+                // binding); the scope key stays per-scope. The instance is
+                // runtime information only the executing occupant knows; the
+                // hook requires it from the environment rather than inventing
+                // one.
+                packet_arg = {
+                    let packet_flag =
+                        format!(" \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\"");
+                    match law.scope {
+                        spec::model::ObligationScope::Instance => format!(
+                            "{packet_flag} \\\n  --instance \"${{HARNESS_INSTANCE:?instance-scoped obligation requires HARNESS_INSTANCE}}\""
+                        ),
+                        _ => packet_flag,
+                    }
                 },
             ),
             other => format!(
@@ -363,7 +380,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
         out.push(GenFile {
             path: APPROVE_COMMIT_HOOK.to_string(),
             content: format!(
-                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding, each\n# at its declared scope. Every commit evaluation is recorded to the Ledger.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" --playbook-ref \"{playbook}\" --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\"{requires}\n",
+                "#!/usr/bin/env bash\n{header}# Gate: block `git commit` while a required obligation is outstanding, each\n# at its declared scope. Every commit evaluation is recorded to the Ledger.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-commit --ledger \"{ledger}\" --run-id \"${{CLAUDE_SESSION_ID:-unbound-$PPID}}\" --playbook-ref \"{playbook}\" --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\"{requires}\n",
                 header = prov.hash_header(),
                 playbook = prov.refs.playbook_ref,
             ),
@@ -375,7 +392,7 @@ fn hook_files(prov: &Prov, compiled: &CompiledSpec) -> Vec<GenFile> {
     out.push(GenFile {
         path: PROTECT_HOOK.to_string(),
         content: format!(
-            "#!/usr/bin/env bash\n{header}# Self-protection: block `rm`/`mv`/redirect against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --protected \"{protected}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unknown}}\" \\\n  --playbook-ref \"{playbook}\"\n",
+            "#!/usr/bin/env bash\n{header}# Self-protection: block `rm`/`mv`/redirect against enforcement artifacts.\nset -euo pipefail\nexec \"${{KERNEL_BIN:-kernel}}\" pre-bash \\\n  --packet \"${{INTAKE_ACTIVE_PACKET:-{packet}}}\" \\\n  --protected \"{protected}\" \\\n  --ledger \"{ledger}\" \\\n  --run-id \"${{CLAUDE_SESSION_ID:-unbound-$PPID}}\" \\\n  --playbook-ref \"{playbook}\"\n",
             header = prov.hash_header(),
             protected = PROTECTED_FILE,
             playbook = prov.refs.playbook_ref,
@@ -607,14 +624,14 @@ fn playbook_manifest(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     )
 }
 
-fn protected_file(prov: &Prov) -> GenFile {
+fn protected_file(prov: &Prov, compiled: &CompiledSpec) -> GenFile {
     let mut body = prov.hash_header();
     body.push_str("# Protected enforcement artifacts. A write to any of these requires a task\n");
     body.push_str(
         "# packet with amends_enforcement = true (an explicit, auditable Intake grant).\n",
     );
-    for p in protected_prefixes() {
-        body.push_str(p);
+    for p in protected_prefixes(compiled) {
+        body.push_str(&p);
         body.push('\n');
     }
     GenFile {
@@ -889,6 +906,37 @@ platform: { type: claude-code }
     }
 
     #[test]
+    fn hooks_derive_a_run_identity_instead_of_the_ambiguous_fallback() {
+        // `unknown` put every session in one bucket — the self-trial ran its
+        // whole ledger under it, and the kernel now fails the commit gate
+        // closed on it. When the platform exposes no session id, the hooks
+        // derive a per-session identity from the parent process instead.
+        let g = build();
+        for path in [
+            "harness/hooks/enforce_file_scope.sh",
+            "harness/hooks/require_validation.sh",
+            APPROVE_COMMIT_HOOK,
+            PROTECT_HOOK,
+        ] {
+            let hook = &find(&g, path).content;
+            assert!(
+                hook.contains("${CLAUDE_SESSION_ID:-unbound-$PPID}"),
+                "{path} must not fall back to a shared 'unknown' run identity"
+            );
+        }
+    }
+
+    #[test]
+    fn obligation_hook_always_binds_the_packet_identity() {
+        // Identity binding is not scope keying: even a run-scoped obligation
+        // event names the admitted packet it served, so the ledger can answer
+        // "which packet governed this edit" without joins over time.
+        let g = build();
+        let hook = &find(&g, "harness/hooks/require_validation.sh").content;
+        assert!(hook.contains("--packet"));
+    }
+
+    #[test]
     fn declared_obligation_scope_flows_into_the_generated_hooks() {
         // The spec declares the scope; the compiled hooks carry it to the
         // kernel — recording side (--scope) and gate side (--require
@@ -959,6 +1007,13 @@ platform: { type: claude-code }
         assert!(protected.contains("harness.patterns.yaml"));
         assert!(protected.contains(".claude/"));
         assert!(protected.contains("harness/"));
+        // The spec-declared TCB extends the generated set: the kernel and
+        // compiler source are enforcement artifacts of a self-hosting
+        // workspace, so editing them requires the same explicit grant.
+        assert!(protected.contains("crates/kernel/"));
+        assert!(protected.contains("crates/spec/"));
+        assert!(protected.contains("crates/harnessc/"));
+        assert!(protected.contains("Cargo.lock"));
 
         let hook = &find(&g, PROTECT_HOOK).content;
         assert!(hook.contains("pre-bash"));

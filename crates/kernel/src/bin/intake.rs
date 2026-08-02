@@ -10,10 +10,10 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use kernel::clock::now_rfc3339;
-use kernel::intake::{admit, AdmitError};
+use kernel::intake::{admit_with_protected, AdmitError};
 use kernel::ledger::Ledger;
 use kernel::packet::TaskPacket;
-use kernel::validate::validate;
+use kernel::validate::validate_with_protected;
 
 /// The Intake pattern as a command: work enters only as a typed, validated
 /// task packet recorded as append-only evidence.
@@ -23,6 +23,13 @@ struct Cli {
     /// Path to the append-only ledger file.
     #[arg(long, global = true, default_value = ".intake/ledger.jsonl")]
     ledger: PathBuf,
+
+    /// File listing protected enforcement-artifact path prefixes (one per
+    /// line). A packet whose write scope intersects them must declare
+    /// amends_enforcement = true — the classification is derived, never
+    /// self-asserted. Missing file → empty set.
+    #[arg(long, global = true, default_value = "harness/enforcement.protected")]
+    protected: PathBuf,
 
     #[command(subcommand)]
     command: Command,
@@ -87,7 +94,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Validate { file } => {
             let packet = load_packet(file)?;
-            let report = validate(&packet);
+            let report = validate_with_protected(&packet, &load_protected(&cli.protected));
             if report.is_ok() {
                 println!("ok: '{}' is a valid task packet", packet.title);
                 Ok(ExitCode::SUCCESS)
@@ -98,7 +105,7 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Submit { file } => {
             let packet = load_packet(file)?;
-            match admit(&packet, now_rfc3339()) {
+            match admit_with_protected(&packet, now_rfc3339(), &load_protected(&cli.protected)) {
                 Ok(record) => {
                     let ledger = Ledger::at(&cli.ledger);
                     ledger.append(&record)?;
@@ -162,6 +169,21 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         },
     }
+}
+
+/// Load protected path prefixes (one per line; `#` comments and blanks
+/// ignored). A missing file reads as an empty set — a workspace without a
+/// compiled harness has no enforcement tree to protect.
+fn load_protected(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Load a packet from a `.json` file (parsed as JSON) or anything else

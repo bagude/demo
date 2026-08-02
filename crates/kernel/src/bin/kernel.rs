@@ -184,6 +184,13 @@ enum Command {
     /// Ledger chain operations: prove the append-only log's integrity.
     #[command(subcommand)]
     Ledger(LedgerCmd),
+    /// Constitutional succession: the governed replacement of the governor
+    /// (see docs/SUCCESSION.md). `disarm` marks the start of the ungoverned
+    /// window under the old runtime; `activate` is the successor's first
+    /// event, refused unless the gate-approved manifest matches the running
+    /// binary.
+    #[command(subcommand)]
+    Succession(SuccessionCmd),
     /// Approver key operations for signature-authenticated approvals.
     #[command(subcommand)]
     Key(KeyCmd),
@@ -360,6 +367,72 @@ enum GateCmd {
         /// recorded gate.verify event).
         #[arg(long)]
         playbook_ref: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SuccessionCmd {
+    /// Mark the start of the ungoverned maintenance window, under the OLD
+    /// runtime. Requires an active packet carrying the amends_enforcement
+    /// grant — replacing the governor is the definitive enforcement
+    /// amendment. Prints the values a succession manifest must bind
+    /// (old_runtime_ref, chain head) so the operator authors it from
+    /// recorded fact, not memory.
+    Disarm {
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        /// The maintenance packet authorizing the surgery.
+        #[arg(long)]
+        packet: PathBuf,
+        /// The defect forcing the disarm, in prose (cite a policy code where
+        /// one exists).
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
+    },
+    /// The successor's first governed event. Refused — and the refusal
+    /// recorded — unless the gate-approved manifest's action hash matches the
+    /// manifest bytes as they are NOW, the approval is signature-proven (or
+    /// explicitly --allow-unproven), the inherited chain head is still in the
+    /// ledger's history, and the manifest's successor identities match the
+    /// binary and playbook actually activating.
+    Activate {
+        /// The succession manifest (JSON; see docs/SUCCESSION.md).
+        #[arg(long)]
+        manifest: PathBuf,
+        /// The approved gate checkpoint whose action hash covers the manifest.
+        #[arg(long)]
+        checkpoint: PathBuf,
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
+        /// Conformance command whose success is a precondition of activation
+        /// (e.g. the conformance fixture suite). Failure refuses activation.
+        #[arg(long)]
+        check: Option<String>,
+        /// Trusted-keys registry for re-proving a signature-authenticated
+        /// approval. Required when the stored approval claims signature auth.
+        #[arg(long)]
+        trusted_keys: Option<PathBuf>,
+        /// Pinned authority public key for the registry (see gate verify).
+        #[arg(long)]
+        authority: Option<String>,
+        /// Accept a Claimed/Token approval. Off by default: the running
+        /// kernel must never approve its own successor, so an unproven
+        /// approval requires this explicit, auditable override.
+        #[arg(long)]
+        allow_unproven: bool,
+        /// Current precondition values as `key=value`, revalidated against
+        /// the approval's snapshot. Defaults to the snapshot itself when
+        /// omitted.
+        #[arg(long = "precondition")]
+        preconditions: Vec<String>,
     },
 }
 
@@ -956,6 +1029,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         },
         Command::Gate(cmd) => gate(cmd),
+        Command::Succession(cmd) => succession(cmd),
         Command::Registry(cmd) => match cmd {
             RegistryCmd::Sign { registry, key } => {
                 let bytes = std::fs::read(&registry)?;
@@ -1070,6 +1144,28 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                             println!("  records {start}..{} under {k}", start + n - 1);
                             start += n;
                         }
+                    }
+                    // A boundary is a change of governor; a governed one is
+                    // attested by the successor's succession.activate record.
+                    // A silent handover — exactly what the first self-trial
+                    // produced — is warned, not failed: history predating the
+                    // protocol stays legible, but never quiet.
+                    for b in kernel::succession::unattested_boundaries(&events) {
+                        println!(
+                            "warning: unattested succession at record {}: {} -> {} with no \
+                             approved succession.activate attesting the handover",
+                            b.at,
+                            if b.old_runtime_ref.is_empty() {
+                                "(unbound)"
+                            } else {
+                                &b.old_runtime_ref
+                            },
+                            if b.new_runtime_ref.is_empty() {
+                                "(unbound)"
+                            } else {
+                                &b.new_runtime_ref
+                            },
+                        );
                     }
                     Ok(ExitCode::SUCCESS)
                 }
@@ -1392,6 +1488,269 @@ fn load_protected(
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(String::from)
         .collect())
+}
+
+fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use kernel::succession::{codes, SuccessionManifest, ACTIVATE_TRANSITION, DISARM_TRANSITION};
+    match cmd {
+        SuccessionCmd::Disarm {
+            ledger,
+            run_id,
+            packet,
+            reason,
+            playbook_ref,
+        } => {
+            let playbook = playbook_ref.unwrap_or_default();
+            let packet = load_packet(&packet)?;
+            let task_id = packet_task_id(&packet);
+            let granted = packet.amends_enforcement;
+            // The refusal is evidence too: someone asked to suspend
+            // governance without the authority to amend it.
+            let (decision, evidence_refs) = if granted {
+                (Decision::Recorded, vec![format!("reason:{reason}")])
+            } else {
+                (
+                    Decision::Denied,
+                    vec![
+                        format!("policy:{}", codes::AMENDMENT_REQUIRED),
+                        format!(
+                            "reason:packet '{}' carries no amends_enforcement grant; replacing \
+                             the governor is the definitive enforcement amendment",
+                            packet.title
+                        ),
+                    ],
+                )
+            };
+            let event = Event {
+                run_id,
+                task_id: Some(task_id.clone()),
+                parent_task_id: None,
+                action_id: format!("succession_disarm:{task_id}"),
+                actor: "kernel".into(),
+                timestamp: now_rfc3339(),
+                transition: DISARM_TRANSITION.into(),
+                stage: Stage::Proposed.as_str().into(),
+                input_refs: vec![format!("task:{task_id}")],
+                output_refs: vec![],
+                decision,
+                evidence_refs,
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook.clone(),
+                kernel_ref: kernel::kernel_ref(),
+                attempt_id: Some(attempt_nonce()),
+            };
+            EventLog::at(&ledger).append(&event)?;
+            if !granted {
+                eprintln!(
+                    "disarm refused [{}]: the maintenance packet must declare \
+                     amends_enforcement = true",
+                    codes::AMENDMENT_REQUIRED
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+            // Print the recorded facts a manifest must bind, so the operator
+            // authors it from the ledger rather than from memory.
+            let head = EventLog::at(&ledger)
+                .verify_chain()
+                .map(|r| r.head.unwrap_or_default())
+                .unwrap_or_default();
+            println!("disarmed under task {task_id}");
+            println!("old_runtime_ref: {}", kernel::runtime_ref(&playbook));
+            println!("old_kernel_ref:  {}", kernel::kernel_ref());
+            println!("old_ledger_head: {head}");
+            Ok(ExitCode::SUCCESS)
+        }
+        SuccessionCmd::Activate {
+            manifest,
+            checkpoint,
+            ledger,
+            run_id,
+            playbook_ref,
+            check,
+            trusted_keys,
+            authority,
+            allow_unproven,
+            preconditions,
+        } => {
+            let playbook = playbook_ref.unwrap_or_default();
+            let m = SuccessionManifest::load(&manifest).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let cp = GateStore::load(&checkpoint)?;
+            let manifest_hash = hash_file(&manifest)?;
+            let hash_tail: String = manifest_hash
+                .trim_start_matches("sha256:")
+                .chars()
+                .take(12)
+                .collect();
+            let input_refs = vec![
+                format!("old_runtime:{}", m.old_runtime_ref),
+                format!("old_head:{}", m.old_ledger_head),
+                format!("manifest:{manifest_hash}"),
+                format!("task:{}", m.maintenance_task_id),
+                format!("new_kernel:{}", m.new_kernel_ref),
+            ];
+
+            // Any refusal is a recorded, coded decision — an unrecorded
+            // refusal of a constitutional transition would be a hole in
+            // exactly the evidence this protocol exists to create.
+            let refuse = |code: &str,
+                          reason: String|
+             -> Result<ExitCode, Box<dyn std::error::Error>> {
+                let event = Event {
+                    run_id: run_id.clone(),
+                    task_id: Some(m.maintenance_task_id.clone()),
+                    parent_task_id: None,
+                    action_id: format!("succession_activate:{hash_tail}"),
+                    actor: "kernel".into(),
+                    timestamp: now_rfc3339(),
+                    transition: ACTIVATE_TRANSITION.into(),
+                    stage: Stage::Authorized.as_str().into(),
+                    input_refs: input_refs.clone(),
+                    output_refs: vec![],
+                    decision: Decision::Rejected,
+                    evidence_refs: vec![format!("policy:{code}"), format!("reason:{reason}")],
+                    runtime_ref: kernel::runtime_ref(&playbook),
+                    playbook_ref: playbook.clone(),
+                    kernel_ref: kernel::kernel_ref(),
+                    attempt_id: Some(attempt_nonce()),
+                };
+                if let Err(e) = EventLog::at(&ledger).append(&event) {
+                    eprintln!("warning: could not record the refusal: {e}");
+                }
+                eprintln!("activation refused [{code}]: {reason}");
+                Ok(ExitCode::FAILURE)
+            };
+
+            // A "succession" between identical constitutions attests nothing.
+            if m.old_runtime_ref == m.new_runtime_ref {
+                return refuse(
+                    codes::NO_TRANSITION,
+                    "old_runtime_ref equals new_runtime_ref; there is no transition to attest"
+                        .into(),
+                );
+            }
+            // The approval must cover these manifest bytes, unchanged, now.
+            let current_preconditions = if preconditions.is_empty() {
+                cp.preconditions.clone()
+            } else {
+                parse_preconditions(&preconditions)?
+            };
+            if let Err(e) = cp.revalidate(&manifest_hash, &current_preconditions, &now_rfc3339()) {
+                let code = match &e {
+                    kernel::gate::GateError::ActionChanged { .. } => codes::MANIFEST_MISMATCH,
+                    _ => codes::NOT_APPROVED,
+                };
+                return refuse(code, e.to_string());
+            }
+            // The running kernel must never approve its own successor: the
+            // approval must be proven against the trusted registry, or the
+            // operator must own the weaker claim explicitly.
+            let approval = cp.approval.as_ref().expect("revalidate proved approval");
+            if matches!(approval.approver.auth, AuthMethod::Signature) {
+                let Some(tk) = trusted_keys.as_deref() else {
+                    return refuse(
+                        codes::NOT_APPROVED,
+                        "the approval claims signature auth; pass --trusted-keys to re-prove it"
+                            .into(),
+                    );
+                };
+                if let Err(e) = kernel::sign::reverify_signed_approval(
+                    &cp,
+                    tk,
+                    authority.as_deref(),
+                    &now_rfc3339(),
+                ) {
+                    return refuse(codes::NOT_APPROVED, e.to_string());
+                }
+            } else if !allow_unproven {
+                return refuse(
+                    codes::APPROVAL_UNPROVEN,
+                    format!(
+                        "approval by '{}' is {:?}-authenticated; succession requires a \
+                         signature-proven approval (or the explicit --allow-unproven override)",
+                        approval.approver.principal, approval.approver.auth
+                    ),
+                );
+            }
+            // Continuity: the successor inherits exactly the history the
+            // manifest binds. A ledger that no longer contains the head was
+            // truncated or rewritten across the ungoverned window.
+            if let Err(e) = EventLog::at(&ledger).verify_anchor(&m.old_ledger_head) {
+                return refuse(codes::HEAD_MISSING, e.to_string());
+            }
+            // Self-attestation: the binary performing activation IS the
+            // successor the manifest was approved for, under the constitution
+            // it claims.
+            if m.new_kernel_ref != kernel::kernel_ref() {
+                return refuse(
+                    codes::KERNEL_MISMATCH,
+                    format!(
+                        "manifest names successor kernel {} but the activating binary is {}",
+                        m.new_kernel_ref,
+                        kernel::kernel_ref()
+                    ),
+                );
+            }
+            if m.new_runtime_ref != kernel::runtime_ref(&playbook) {
+                return refuse(
+                    codes::RUNTIME_MISMATCH,
+                    format!(
+                        "manifest names successor runtime {} but activation computes {}",
+                        m.new_runtime_ref,
+                        kernel::runtime_ref(&playbook)
+                    ),
+                );
+            }
+            // The candidate proves fitness now, not by reputation.
+            if let Some(cmd) = &check {
+                let status = std::process::Command::new("sh").arg("-c").arg(cmd).status()?;
+                if !status.success() {
+                    return refuse(
+                        codes::CONFORMANCE_FAILED,
+                        format!("conformance check failed: `{cmd}`"),
+                    );
+                }
+            }
+
+            let mut evidence_refs = vec![
+                format!("patch:{}", m.patch_ref),
+                format!("conformance:{}", m.conformance_ref),
+                format!("approver:{}", approval.approver.principal),
+            ];
+            if let Some(cmd) = &check {
+                evidence_refs.push(format!("check:{cmd}"));
+            }
+            if !m.disarm_recorded {
+                // The residual-trust case, made explicit rather than hidden.
+                evidence_refs.push("disarm_recorded:false".into());
+            }
+            let event = Event {
+                run_id,
+                task_id: Some(m.maintenance_task_id.clone()),
+                parent_task_id: None,
+                action_id: format!("succession_activate:{hash_tail}"),
+                actor: "kernel".into(),
+                timestamp: now_rfc3339(),
+                transition: ACTIVATE_TRANSITION.into(),
+                stage: Stage::Completed.as_str().into(),
+                input_refs,
+                output_refs: vec![],
+                decision: Decision::Approved,
+                evidence_refs,
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook.clone(),
+                kernel_ref: kernel::kernel_ref(),
+                attempt_id: Some(attempt_nonce()),
+            };
+            EventLog::at(&ledger).append(&event)?;
+            println!(
+                "succession activated: {} -> {} (inheriting head {})",
+                m.old_runtime_ref,
+                m.new_runtime_ref,
+                m.old_ledger_head
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
 }
 
 fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "_generated": {
-    "compiler_ref": "sha256:4de946510de7250f6724e9fe731c6f7523b40ff6c930eccb458adaa057aaf745",
+    "compiler_ref": "sha256:9998030152e070abfb3647576e363133a12e392da11850593f9ccc57d64d401d",
     "from": "harness.patterns.yaml",
     "generator": "harnessc 0.1.0",
     "ir_ref": "sha256:ded0b776aa4cb1f62bc0ef55019a23b125dd0dfde6876ddb646be506b87b3536",
     "ir_schema": "2",
     "note": "DO NOT EDIT DIRECTLY — edit the spec and run `harnessc build`.",
-    "playbook_ref": "sha256:d1d481267c1ce4acadd3df9e7ecbbe9c361bf6c21c1204e3473d004ce293b85d",
+    "playbook_ref": "sha256:1c3e4490946e1f08ed5b672997821b16ff760d56cd9edf0e037c60327dc7fb52",
     "source_ref": "sha256:6f0092445976b94c5ffe3ced3dd924638700a22c8bf1668df8397bbe1d4c76e7"
   },
   "properties": {

@@ -1,10 +1,18 @@
 # Constitutional Succession
 
 > How one trusted runtime hands governance to its successor — the protocol the
-> first self-trial proved missing. Status: **implemented** (`kernel succession
-> disarm|activate`, the gate-bound manifest, boundary attestation in
-> `kernel ledger verify`, and the conformance fixture matrix in
-> `crates/kernel/tests/conformance.rs`), under task packet `a6b89a7737f0`.
+> first self-trial proved missing. Status: **implemented and
+> boundary-enforced** (`kernel succession disarm|activate|abort`, the
+> gate-bound manifest, candidate mode, the boundary invariant and
+> legacy-bootstrap allowlist in `kernel ledger verify`, and the conformance
+> fixture matrix in `crates/kernel/tests/conformance.rs`), under task packets
+> `a6b89a7737f0` (protocol) and `bf3646c39e39` (boundary repair).
+>
+> The constitutional statement the boundary repair enforces:
+>
+> **A candidate runtime may describe and prove its proposed succession, but
+> it may not govern until its authority is anchored to the exact final head
+> of the predecessor and a valid activation has entered the ledger.**
 
 ## The finding
 
@@ -152,6 +160,71 @@ The full cycle — disarm → manifest → signature approval → tampered-manif
 refusal → activation → attested boundary, plus the silent-handover
 counterfactual the verifier flags — runs in
 `crates/kernel/tests/succession.rs`.
+
+## The boundary invariant and candidate mode
+
+The founding ceremony exposed a second-order defect: the *attestation* was
+present but the *transfer* was not causally sound. Its manifest bound an
+"old ledger head" that was two records deep into the candidate's own
+governance, and the verifier of that era accepted the boundary because it
+only checked that an activation eventually existed. The boundary repair
+(packet `bf3646c39e39`) makes the transfer itself mechanical:
+
+- **Manifests declare `transition_mode`** (`normal` | `bootstrap`) and bind
+  **both** authorities: `maintenance_task_id` (who built the candidate) and
+  `ceremony_task_id` (who is seating it). For `normal` transitions
+  `disarm_recorded` must be true and a recorded `succession.disarm` under
+  the predecessor runtime must precede the bound head.
+- **The boundary invariants**, enforced at activation and re-checked by the
+  verifier: the declared head names the predecessor's exact final record,
+  emitted under the declared predecessor runtime; the candidate boundary
+  record's `prev` equals that head; and every candidate-runtime record
+  through the activation is **candidate-safe** — a closed allowlist
+  (`succession.candidate_started`, `conformance_requested`,
+  `conformance_recorded`, `approval_requested`, `approval_recorded`,
+  `activate`, `abort`), never a naming convention. Violations are refusals:
+  `succession-boundary-head-mismatch`,
+  `succession-predecessor-runtime-mismatch`,
+  `succession-candidate-governance-before-activation`,
+  `succession-candidate-event-not-allowed`.
+- **Candidate mode is automatic.** A kernel whose computed runtime differs
+  from the ledger's active runtime (the last approved activation) refuses
+  ordinary governance mechanically — pre-tool, obligations, discharges, the
+  commit gate, hive operations, gate ledger-appends, disarm, and task
+  admission all return `succession-runtime-not-active`. Refusals are **not
+  recorded**: any kind they could carry is itself ordinary governance, and
+  recording one would poison the candidate-safe span. A ceremony therefore
+  runs its gate without `--ledger`; the manifest carries the head, and the
+  activation is the ceremony's ledger record. `succession.abort` abandons a
+  ceremony without ever opening governance. A ledger with **no** approved
+  activation has no regime — every runtime governs, and the first
+  activation founds the regime.
+- **Bootstraps are never self-declared.** `activate` refuses
+  `transition_mode: bootstrap` outright; the verifier accepts a bootstrap
+  (or legacy mode-absent) activation only through an exact, digest-pinned,
+  **single-use** allowlist entry (`--exceptions`), reports it as
+  `VALID_WITH_LEGACY_BOOTSTRAP_EXCEPTION` with its anomaly retained, and
+  never describes it as satisfying the normal invariant
+  (`succession-bootstrap-not-authorized`, `succession-bootstrap-reused`).
+
+## The founding transition's known boundary defect
+
+`succession-0001` is immutable — never edited, regenerated, or re-signed —
+and is accepted solely through the allowlist entry in
+[`evidence/succession-exceptions.json`](../evidence/succession-exceptions.json).
+Its recorded anomaly, which the repaired verifier reports verbatim:
+
+- true predecessor head: `sha256:65ffd83f…` (the hash of record 68, the
+  final event under runtime `02a6c163…`);
+- manifest-bound head: `sha256:fd5777db…` (the hash of record 70);
+- records 69–70 (a validation discharge and a commit-gate allow) were
+  emitted by the candidate runtime before formal activation;
+- the historical verifier accepted the transition without adjacency
+  enforcement.
+
+Verification without the allowlist **fails** on this ledger; with it, the
+boundary is classified `VALID_WITH_LEGACY_BOOTSTRAP_EXCEPTION` — visible,
+specific, and never normal.
 
 ## The first attested succession
 

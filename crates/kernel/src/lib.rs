@@ -146,7 +146,8 @@ pub fn runtime_ref(playbook_ref: &str) -> String {
 }
 
 pub use event::{
-    line_digest, ChainError, ChainReport, Decision, Event, EventLog, Record, Stage, CHAIN_GENESIS,
+    line_digest, ChainError, ChainReport, Decision, Event, EventLog, LedgerLine, Record, Stage,
+    CHAIN_GENESIS,
 };
 pub use gate::{ApprovalBinding, Approver, AuthMethod, Checkpoint, GateError, GateStore};
 pub use hive::{
@@ -162,7 +163,11 @@ pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
 pub use sign::{
     approval_message, reverify_signed_approval, trusted_key_for, Keypair, ReverifyError, SignError,
 };
-pub use succession::{unattested_boundaries, SuccessionManifest, UnattestedBoundary};
+pub use succession::{
+    active_runtime, is_candidate_safe, load_exceptions, runtime_status, unattested_boundaries,
+    validate_boundary, verify_successions, BootstrapException, RuntimeStatus, SuccessionFinding,
+    SuccessionManifest, UnattestedBoundary, CANDIDATE_SAFE,
+};
 pub use validate::{validate, validate_with_protected, Report, Violation};
 
 #[cfg(test)]

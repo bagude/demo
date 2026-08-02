@@ -265,6 +265,17 @@ pub struct ChainReport {
     pub head: Option<String>,
 }
 
+/// One ledger line as read back for judgment: its chain fields (absent for a
+/// legacy unchained record), the digest of its exact bytes, and the event it
+/// carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerLine {
+    pub seq: Option<u64>,
+    pub prev: Option<String>,
+    pub digest: String,
+    pub event: Event,
+}
+
 /// A handle to an append-only event log file (JSON lines).
 pub struct EventLog {
     path: PathBuf,
@@ -454,6 +465,38 @@ impl EventLog {
             },
             digests,
         ))
+    }
+
+    /// Read every line with its chain fields and **line digest**, in order —
+    /// the view boundary invariants are judged over: a succession must name
+    /// the exact digest of the predecessor's final line, and only this
+    /// per-line reading can check adjacency. Unchained legacy lines read
+    /// with `seq`/`prev` of `None`. A missing log reads as empty.
+    pub fn read_lines(&self) -> io::Result<Vec<LedgerLine>> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let seq = v.get("seq").and_then(|s| s.as_u64());
+            let prev = v
+                .get("prev")
+                .and_then(|p| p.as_str())
+                .map(|p| p.to_string());
+            let event: Event = serde_json::from_str(line)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            out.push(LedgerLine {
+                seq,
+                prev,
+                digest: line_digest(line),
+                event,
+            });
+        }
+        Ok(out)
     }
 
     /// Read every event in insertion order. A missing log reads as empty.

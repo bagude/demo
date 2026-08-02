@@ -434,6 +434,20 @@ enum SuccessionCmd {
         #[arg(long = "precondition")]
         preconditions: Vec<String>,
     },
+    /// Abandon a candidate ceremony. Candidate-safe: the record is appended,
+    /// and the runtime remains unauthorized — an abort never opens a path to
+    /// ordinary governance.
+    Abort {
+        #[arg(long)]
+        ledger: PathBuf,
+        #[arg(long, default_value = "unknown")]
+        run_id: String,
+        /// Why the ceremony is being abandoned.
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        playbook_ref: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -446,6 +460,13 @@ enum LedgerCmd {
     Verify {
         #[arg(long)]
         ledger: PathBuf,
+        /// Founding-transition allowlist (JSON array of {transition_id,
+        /// manifest_digest, exception}). A bootstrap or mode-absent
+        /// activation is accepted ONLY through an exact, single-use entry
+        /// here — and is reported as an exception, never as satisfying the
+        /// normal boundary invariant.
+        #[arg(long)]
+        exceptions: Option<PathBuf>,
     },
 }
 
@@ -608,6 +629,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
             let run_id = effective_run_id(&run_id, &stdin);
+            // An obligation record is ordinary governance.
+            let playbook = playbook_ref.clone().unwrap_or_default();
+            if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                runtime_status_for(Some(&ledger), &playbook)
+            {
+                return Ok(refuse_not_active(
+                    "obligation recording",
+                    &active_runtime,
+                    Some(&ledger),
+                    &playbook,
+                    true,
+                ));
+            }
             // Recorded workspace-relative like the Guard's evidence, so an
             // action-scoped discharge (`validate --path <rel>`) matches the
             // key this event opened.
@@ -666,6 +700,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 return Ok(ExitCode::SUCCESS);
             }
             let run_id = effective_run_id(&run_id, &stdin);
+            // Commit authorization is ordinary governance.
+            let playbook_probe = playbook_ref.clone().unwrap_or_default();
+            if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                runtime_status_for(Some(&ledger), &playbook_probe)
+            {
+                return Ok(refuse_not_active(
+                    "commit authorization",
+                    &active_runtime,
+                    Some(&ledger),
+                    &playbook_probe,
+                    true,
+                ));
+            }
             let task_id = packet
                 .as_deref()
                 .and_then(|p| load_packet(p).ok())
@@ -783,6 +830,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         .into(),
                 );
             }
+            // A validation discharge is ordinary governance.
+            let playbook_probe = playbook_ref.clone().unwrap_or_default();
+            if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                runtime_status_for(Some(&ledger), &playbook_probe)
+            {
+                return Ok(refuse_not_active(
+                    "validation discharge",
+                    &active_runtime,
+                    Some(&ledger),
+                    &playbook_probe,
+                    false,
+                ));
+            }
             if let Some(cmd) = &check {
                 let status = std::process::Command::new("sh")
                     .arg("-c")
@@ -848,6 +908,20 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             std::io::stdin().read_to_string(&mut stdin)?;
             let req: kernel::hive::SpawnRequest = serde_json::from_str(&stdin)
                 .map_err(|e| format!("spawn request is not valid JSON: {e}"))?;
+
+            // A spawn authorization is ordinary governance.
+            let playbook_probe = playbook_ref.clone().unwrap_or_default();
+            if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                runtime_status_for(ledger.as_deref(), &playbook_probe)
+            {
+                return Ok(refuse_not_active(
+                    "hive spawn authorization",
+                    &active_runtime,
+                    ledger.as_deref(),
+                    &playbook_probe,
+                    true,
+                ));
+            }
 
             enum Mode<'a> {
                 Stateless(u64),
@@ -978,6 +1052,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 run_id,
                 playbook_ref,
             } => {
+                // Settlement mutates the durable pool: ordinary governance.
+                let playbook_probe = playbook_ref.clone().unwrap_or_default();
+                if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                    runtime_status_for(ledger.as_deref(), &playbook_probe)
+                {
+                    return Ok(refuse_not_active(
+                        "hive settlement",
+                        &active_runtime,
+                        ledger.as_deref(),
+                        &playbook_probe,
+                        false,
+                    ));
+                }
                 let result = kernel::hive::BudgetPool::at(&store, &hive).settle(&spawn_id, spent);
                 if let Some(ledger) = &ledger {
                     // Settlement — including a refused overspend — is evidence.
@@ -1105,7 +1192,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             );
             Ok(ExitCode::SUCCESS)
         }
-        Command::Ledger(LedgerCmd::Verify { ledger }) => {
+        Command::Ledger(LedgerCmd::Verify { ledger, exceptions }) => {
             match EventLog::at(&ledger).verify_chain() {
                 Ok(report) => {
                     println!(
@@ -1124,13 +1211,13 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     // (playbook + kernel + ABI as one digest) — a mid-history
                     // kernel or playbook swap is a visible boundary here, not
                     // a field-diffing exercise.
-                    let events = EventLog::at(&ledger).read_all().unwrap_or_default();
+                    let lines = EventLog::at(&ledger).read_lines().unwrap_or_default();
                     let mut segments: Vec<(String, usize)> = Vec::new();
-                    for ev in &events {
-                        let key = if ev.runtime_ref.is_empty() {
+                    for l in &lines {
+                        let key = if l.event.runtime_ref.is_empty() {
                             "(unbound: pre-runtime_ref or foreign record)".to_string()
                         } else {
-                            ev.runtime_ref.clone()
+                            l.event.runtime_ref.clone()
                         };
                         match segments.last_mut() {
                             Some((k, n)) if *k == key => *n += 1,
@@ -1145,27 +1232,70 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                             start += n;
                         }
                     }
-                    // A boundary is a change of governor; a governed one is
-                    // attested by the successor's succession.activate record.
-                    // A silent handover — exactly what the first self-trial
-                    // produced — is warned, not failed: history predating the
-                    // protocol stays legible, but never quiet.
-                    for b in kernel::succession::unattested_boundaries(&events) {
-                        println!(
-                            "warning: unattested succession at record {}: {} -> {} with no \
-                             approved succession.activate attesting the handover",
-                            b.at,
-                            if b.old_runtime_ref.is_empty() {
-                                "(unbound)"
-                            } else {
-                                &b.old_runtime_ref
-                            },
-                            if b.new_runtime_ref.is_empty() {
-                                "(unbound)"
-                            } else {
-                                &b.new_runtime_ref
-                            },
-                        );
+                    // Every change of governor is judged. A normal transition
+                    // must satisfy the full boundary invariant; the founding
+                    // bootstrap passes only through its digest-pinned
+                    // allowlist entry and is never described as normal; a
+                    // handover with no activation at all warns (history
+                    // predating the protocol stays legible, but never
+                    // quiet); anything else is a violation and verification
+                    // FAILS.
+                    let allow = match &exceptions {
+                        Some(p) => kernel::load_exceptions(p)
+                            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
+                        None => Vec::new(),
+                    };
+                    let mut violated = false;
+                    for f in kernel::verify_successions(&lines, &allow) {
+                        match f {
+                            kernel::SuccessionFinding::ValidNormal {
+                                at,
+                                old_runtime_ref,
+                                new_runtime_ref,
+                            } => println!(
+                                "succession at record {at}: VALID (normal boundary invariant) \
+                                 {old_runtime_ref} -> {new_runtime_ref}"
+                            ),
+                            kernel::SuccessionFinding::LegacyBootstrap {
+                                at,
+                                transition_id,
+                                manifest_digest,
+                                anomaly,
+                            } => println!(
+                                "succession at record {at}: \
+                                 VALID_WITH_LEGACY_BOOTSTRAP_EXCEPTION ({transition_id}, \
+                                 manifest {manifest_digest}) — {anomaly}"
+                            ),
+                            kernel::SuccessionFinding::Unattested {
+                                at,
+                                old_runtime_ref,
+                                new_runtime_ref,
+                            } => println!(
+                                "warning: unattested succession at record {at}: {} -> {} with \
+                                 no approved succession.activate attesting the handover",
+                                if old_runtime_ref.is_empty() {
+                                    "(unbound)"
+                                } else {
+                                    &old_runtime_ref
+                                },
+                                if new_runtime_ref.is_empty() {
+                                    "(unbound)"
+                                } else {
+                                    &new_runtime_ref
+                                },
+                            ),
+                            kernel::SuccessionFinding::Violation { at, code, reason } => {
+                                violated = true;
+                                eprintln!(
+                                    "succession violation at record {at} [policy:{code}]: \
+                                     {reason}"
+                                );
+                            }
+                        }
+                    }
+                    if violated {
+                        eprintln!("ledger verification FAILED: succession boundary violations");
+                        return Ok(ExitCode::FAILURE);
                     }
                     Ok(ExitCode::SUCCESS)
                 }
@@ -1192,6 +1322,23 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             let stage =
                 Stage::parse(&stage).ok_or_else(|| format!("unknown lifecycle stage '{stage}'"))?;
             let playbook = playbook_ref.unwrap_or_default();
+            // A candidate may append ONLY candidate-safe kinds — the closed
+            // allowlist, never a naming convention.
+            if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                runtime_status_for(Some(&ledger), &playbook)
+            {
+                if !kernel::is_candidate_safe(&transition) {
+                    eprintln!(
+                        "refused [{}]: event kind '{transition}' is not on the closed \
+                         candidate-safe allowlist ({}).\n  active runtime:    {active_runtime}\n\
+                         \x20 candidate runtime: {}",
+                        kernel::succession::codes::CANDIDATE_EVENT_NOT_ALLOWED,
+                        kernel::CANDIDATE_SAFE.join(", "),
+                        kernel::runtime_ref(&playbook),
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
             let event = Event {
                 run_id,
                 task_id,
@@ -1232,6 +1379,21 @@ fn pre_tool(
     let Some(supplied) = path else {
         return Ok(ExitCode::SUCCESS);
     };
+
+    // Runtime authority precedes packet authority: a candidate runtime may
+    // not authorize edits at all, whatever the packet grants.
+    let playbook = playbook_ref.clone().unwrap_or_default();
+    if let kernel::RuntimeStatus::Candidate { active_runtime } =
+        runtime_status_for(ledger, &playbook)
+    {
+        return Ok(refuse_not_active(
+            "pre-tool authorization",
+            &active_runtime,
+            ledger,
+            &playbook,
+            true,
+        ));
+    }
 
     // Rebind the platform shape before any policy reasoning: tool harnesses
     // hand over absolute host paths, while authority is judged
@@ -1368,6 +1530,21 @@ fn pre_bash(
         return Ok(ExitCode::SUCCESS);
     };
 
+    // A protected mutation is ordinary governance; a candidate refuses it
+    // before the grant is even consulted.
+    let playbook = playbook_ref.clone().unwrap_or_default();
+    if let kernel::RuntimeStatus::Candidate { active_runtime } =
+        runtime_status_for(ledger, &playbook)
+    {
+        return Ok(refuse_not_active(
+            "protected-command authorization",
+            &active_runtime,
+            ledger,
+            &playbook,
+            true,
+        ));
+    }
+
     // A destructive command touches a protected artifact. Allow only under an
     // explicit amends_enforcement grant.
     let packet = load_packet(packet_path).ok();
@@ -1501,6 +1678,18 @@ fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>
             playbook_ref,
         } => {
             let playbook = playbook_ref.unwrap_or_default();
+            // A candidate cannot disarm a runtime it does not hold.
+            if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                runtime_status_for(Some(&ledger), &playbook)
+            {
+                return Ok(refuse_not_active(
+                    "succession disarm",
+                    &active_runtime,
+                    Some(&ledger),
+                    &playbook,
+                    false,
+                ));
+            }
             let packet = load_packet(&packet)?;
             let task_id = packet_task_id(&packet);
             let granted = packet.amends_enforcement;
@@ -1581,23 +1770,39 @@ fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>
                 .chars()
                 .take(12)
                 .collect();
-            let input_refs = vec![
+            let mut input_refs = vec![
                 format!("old_runtime:{}", m.old_runtime_ref),
                 format!("old_head:{}", m.old_ledger_head),
                 format!("manifest:{manifest_hash}"),
                 format!("task:{}", m.maintenance_task_id),
                 format!("new_kernel:{}", m.new_kernel_ref),
             ];
+            if !m.transition_mode.is_empty() {
+                input_refs.push(format!("mode:{}", m.transition_mode));
+            }
+            if !m.ceremony_task_id.is_empty() {
+                input_refs.push(format!("ceremony_task:{}", m.ceremony_task_id));
+            }
+            let input_refs = input_refs;
+            // The event names the packet authorizing the LIVE act; the
+            // maintenance task that built the candidate rides as a ref.
+            let event_task = if m.ceremony_task_id.is_empty() {
+                m.maintenance_task_id.clone()
+            } else {
+                m.ceremony_task_id.clone()
+            };
 
             // Any refusal is a recorded, coded decision — an unrecorded
             // refusal of a constitutional transition would be a hole in
-            // exactly the evidence this protocol exists to create.
+            // exactly the evidence this protocol exists to create. (A
+            // rejected succession.activate is candidate-safe, so recording
+            // it never poisons the candidate span.)
             let refuse = |code: &str,
                           reason: String|
              -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let event = Event {
                     run_id: run_id.clone(),
-                    task_id: Some(m.maintenance_task_id.clone()),
+                    task_id: Some(event_task.clone()),
                     parent_task_id: None,
                     action_id: format!("succession_activate:{hash_tail}"),
                     actor: "kernel".into(),
@@ -1625,6 +1830,52 @@ fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>
                 return refuse(
                     codes::NO_TRANSITION,
                     "old_runtime_ref equals new_runtime_ref; there is no transition to attest"
+                        .into(),
+                );
+            }
+            // The transition mode is mandatory, and a bootstrap is never
+            // self-declared: the founding exception lives verifier-side as a
+            // digest-pinned allowlist entry, single-use, and this command
+            // will not mint another.
+            match m.transition_mode.as_str() {
+                "normal" => {}
+                "bootstrap" => {
+                    return refuse(
+                        codes::BOOTSTRAP_NOT_AUTHORIZED,
+                        "transition_mode 'bootstrap' cannot be activated; the founding \
+                         bootstrap is accepted only through the verifier's exact allowlist \
+                         entry, and no future transition may self-declare one"
+                            .into(),
+                    );
+                }
+                "" => {
+                    return refuse(
+                        codes::ACTIVATION_INVALID,
+                        "manifest declares no transition_mode; every new manifest must \
+                         declare 'normal'"
+                            .into(),
+                    );
+                }
+                other => {
+                    return refuse(
+                        codes::ACTIVATION_INVALID,
+                        format!("unknown transition_mode '{other}'"),
+                    );
+                }
+            }
+            if !m.disarm_recorded {
+                return refuse(
+                    codes::ACTIVATION_INVALID,
+                    "a normal transition requires disarm_recorded: true — the predecessor \
+                     records the window's start; the bootstrap exemption is unavailable"
+                        .into(),
+                );
+            }
+            if m.ceremony_task_id.trim().is_empty() {
+                return refuse(
+                    codes::ACTIVATION_INVALID,
+                    "a normal transition must bind ceremony_task_id: who built the candidate \
+                     and who is seating it are different authorities"
                         .into(),
                 );
             }
@@ -1677,6 +1928,41 @@ fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>
             if let Err(e) = EventLog::at(&ledger).verify_anchor(&m.old_ledger_head) {
                 return refuse(codes::HEAD_MISSING, e.to_string());
             }
+            // THE BOUNDARY INVARIANT — the defect succession-0001 proved:
+            // the declared head must be the predecessor's exact final record
+            // (under the declared predecessor runtime), and everything after
+            // it must be candidate-safe records of this candidate. Authority
+            // transfers at a defined ledger position, not at a narrative one.
+            let lines = EventLog::at(&ledger).read_lines()?;
+            if let Err((code, reason)) = kernel::validate_boundary(
+                &lines,
+                &m.old_runtime_ref,
+                &m.new_runtime_ref,
+                &m.old_ledger_head,
+            ) {
+                return refuse(code, reason);
+            }
+            // The predecessor recorded the window's start: a succession.disarm
+            // under the old runtime must precede the declared head.
+            let head_idx = lines
+                .iter()
+                .position(|l| l.digest == m.old_ledger_head)
+                .expect("boundary validation found the head");
+            let disarm_present = lines[..=head_idx].iter().any(|l| {
+                l.event.transition == kernel::succession::DISARM_TRANSITION
+                    && l.event.decision == Decision::Recorded
+                    && l.event.runtime_ref == m.old_runtime_ref
+            });
+            if !disarm_present {
+                return refuse(
+                    codes::ACTIVATION_INVALID,
+                    format!(
+                        "no recorded succession.disarm under predecessor runtime {} precedes \
+                         the declared head {}",
+                        m.old_runtime_ref, m.old_ledger_head
+                    ),
+                );
+            }
             // Self-attestation: the binary performing activation IS the
             // successor the manifest was approved for, under the constitution
             // it claims.
@@ -1725,7 +2011,7 @@ fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>
             }
             let event = Event {
                 run_id,
-                task_id: Some(m.maintenance_task_id.clone()),
+                task_id: Some(event_task.clone()),
                 parent_task_id: None,
                 action_id: format!("succession_activate:{hash_tail}"),
                 actor: "kernel".into(),
@@ -1748,6 +2034,35 @@ fn succession(cmd: SuccessionCmd) -> Result<ExitCode, Box<dyn std::error::Error>
                 m.new_runtime_ref,
                 m.old_ledger_head
             );
+            Ok(ExitCode::SUCCESS)
+        }
+        SuccessionCmd::Abort {
+            ledger,
+            run_id,
+            reason,
+            playbook_ref,
+        } => {
+            let playbook = playbook_ref.unwrap_or_default();
+            let event = Event {
+                run_id,
+                task_id: None,
+                parent_task_id: None,
+                action_id: format!("succession_abort:{}", attempt_nonce()),
+                actor: "kernel".into(),
+                timestamp: now_rfc3339(),
+                transition: kernel::succession::ABORT_TRANSITION.into(),
+                stage: Stage::Recorded.as_str().into(),
+                input_refs: vec![],
+                output_refs: vec![],
+                decision: Decision::Recorded,
+                evidence_refs: vec![format!("reason:{reason}")],
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook,
+                kernel_ref: kernel::kernel_ref(),
+                attempt_id: Some(attempt_nonce()),
+            };
+            EventLog::at(&ledger).append(&event)?;
+            println!("ceremony aborted; this runtime remains unauthorized for ordinary governance");
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -1775,6 +2090,10 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 (None, Some(file)) => hash_file(&file)?,
                 (None, None) => return Err("provide --action-hash or --action-file".into()),
             };
+            if let Some(code) = gate_refused_for_candidate(ledger.as_deref(), playbook_ref.as_deref())
+            {
+                return Ok(code);
+            }
             // An instance-bound checkpoint names a REAL occupant: form-checked
             // always, and held to the compiled positions registry when one is
             // given — an instance of an undeclared position, or a replica slot
@@ -1856,6 +2175,10 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
             playbook_ref,
         } => {
             let mut cp = GateStore::load(&checkpoint)?;
+            if let Some(code) = gate_refused_for_candidate(ledger.as_deref(), playbook_ref.as_deref())
+            {
+                return Ok(code);
+            }
             // Signature auth is VERIFIED before anything is recorded: an
             // approval that claims cryptographic identity must prove it here,
             // or the record would launder a claim into a guarantee.
@@ -1961,6 +2284,10 @@ fn gate(cmd: GateCmd) -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => {
             let cp = GateStore::load(&checkpoint)?;
             let preconds = parse_preconditions(&preconditions)?;
+            if let Some(code) = gate_refused_for_candidate(ledger.as_deref(), playbook_ref.as_deref())
+            {
+                return Ok(code);
+            }
 
             let refuse = |reason: String| -> Result<ExitCode, Box<dyn std::error::Error>> {
                 record_gate_event(
@@ -2231,6 +2558,83 @@ fn load_packet(path: &std::path::Path) -> Result<TaskPacket, Box<dyn std::error:
     } else {
         toml::from_str(&text)?
     })
+}
+
+/// Gate commands append `gate.*` events when given `--ledger` — ordinary
+/// governance a candidate must not write. The checkpoint machinery itself
+/// (request, sign, approve, verify against files) stays available to the
+/// ceremony; only the ledger append is refused, with instructions.
+fn gate_refused_for_candidate(
+    ledger: Option<&std::path::Path>,
+    playbook_ref: Option<&str>,
+) -> Option<ExitCode> {
+    let ledger = ledger?;
+    let playbook = playbook_ref.unwrap_or_default();
+    if let kernel::RuntimeStatus::Candidate { active_runtime } =
+        runtime_status_for(Some(ledger), playbook)
+    {
+        eprintln!(
+            "refused [{code}]: gate events are ordinary governance and this runtime is in \
+             candidate mode (active runtime {active_runtime}, candidate {candidate}). Run the \
+             gate WITHOUT --ledger during a candidate ceremony — the succession manifest \
+             carries the anchored head, and the activation event is the ceremony's ledger \
+             record.",
+            code = kernel::succession::codes::RUNTIME_NOT_ACTIVE,
+            candidate = kernel::runtime_ref(playbook),
+        );
+        return Some(ExitCode::FAILURE);
+    }
+    None
+}
+
+/// Where this invocation's runtime stands relative to the ledger's
+/// succession regime. No ledger context → `Ungoverned` (nothing to differ
+/// from); a ledger with no approved activation → `Ungoverned` (no regime has
+/// been founded); otherwise the computed runtime either IS the active one or
+/// is a candidate.
+fn runtime_status_for(
+    ledger: Option<&std::path::Path>,
+    playbook: &str,
+) -> kernel::RuntimeStatus {
+    let Some(ledger) = ledger else {
+        return kernel::RuntimeStatus::Ungoverned;
+    };
+    let events = EventLog::at(ledger).read_all().unwrap_or_default();
+    kernel::runtime_status(&events, &kernel::runtime_ref(playbook))
+}
+
+/// Refuse ordinary governance from a runtime in candidate mode. The refusal
+/// is deliberately NOT appended to the ledger: every event kind such a
+/// refusal could carry is itself ordinary governance, which a candidate must
+/// not write — recording it would poison the very candidate-safe span the
+/// boundary invariant checks. The refusal lives in the exit code and stderr,
+/// carrying every identity the operator needs.
+fn refuse_not_active(
+    what: &str,
+    active: &str,
+    ledger: Option<&std::path::Path>,
+    playbook: &str,
+    block: bool,
+) -> ExitCode {
+    let head = ledger
+        .and_then(|l| EventLog::at(l).verify_chain().ok())
+        .and_then(|r| r.head)
+        .unwrap_or_else(|| "(unknown)".into());
+    eprintln!(
+        "refused [{code}]: {what} is ordinary governance and this runtime is in candidate mode.\n\
+         \x20 active runtime:    {active}\n\
+         \x20 candidate runtime: {candidate}\n\
+         \x20 ledger head:       {head}\n\
+         Only candidate-safe succession actions are permitted until a valid \
+         succession.activate for this runtime enters the ledger.",
+        code = kernel::succession::codes::RUNTIME_NOT_ACTIVE,
+        candidate = kernel::runtime_ref(playbook),
+    );
+    if block {
+        ExitCode::from(2)
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// The run identity a governed event should carry, resolved from what the

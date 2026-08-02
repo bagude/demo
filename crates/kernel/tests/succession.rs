@@ -1,7 +1,9 @@
-//! The constitutional succession protocol end-to-end, on a fixture workspace:
-//! disarm under the old runtime → gate-bound manifest → signature approval →
-//! refused tampered activation → activation that attests the handover — and a
-//! ledger whose runtime boundary the verifier accepts as governed.
+//! The constitutional succession protocol end-to-end, on a fixture workspace
+//! — now under the **boundary invariant**: a complete synthetic NORMAL
+//! succession (disarm → manifest → signature approval → refused tampered
+//! activation → activation adjacent to the exact predecessor head) that the
+//! verifier accepts with no bootstrap exception, plus the competing-candidate
+//! and silent-handover counterfactuals.
 
 use std::io::Write;
 use std::path::Path;
@@ -49,7 +51,7 @@ fn events(ledger: &Path) -> Vec<serde_json::Value> {
 }
 
 #[test]
-fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
+fn a_normal_succession_transfers_authority_at_the_exact_predecessor_head() {
     let ws = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(ws.path().join("docs")).unwrap();
     std::fs::write(
@@ -84,9 +86,7 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
     );
     assert_eq!(code, 0, "{err}");
 
-    // DISARM, under the old runtime — a packet without the grant is refused
-    // (proven elsewhere by the intake); here the granted one records the
-    // start of the ungoverned window and prints the facts a manifest binds.
+    // DISARM is the predecessor's final record: the head the manifest binds.
     let (code, stdout, err) = kernel_in(
         ws.path(),
         &[
@@ -99,7 +99,7 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
             "--packet",
             "packet.json",
             "--reason",
-            "absolute-path binding defect blocks all platform edits",
+            "seat the boundary-enforcing kernel",
             "--playbook-ref",
             "sha256:pb-old",
         ],
@@ -110,17 +110,16 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
     let old_runtime = line_value(&stdout, "old_runtime_ref:");
     let old_head = line_value(&stdout, "old_ledger_head:");
 
-    // The MANIFEST: authored from recorded fact. The successor here is the
-    // same binary governed by a new playbook — a real constitutional change,
-    // since runtime_ref binds both.
     let new_runtime = kernel::runtime_ref("sha256:pb-new");
     assert_ne!(old_runtime, new_runtime);
     let manifest = ws.path().join("succession.json");
     let manifest_json = serde_json::json!({
+        "transition_mode": "normal",
         "old_runtime_ref": old_runtime,
         "old_ledger_head": old_head,
         "maintenance_task_id": task_id,
-        "reason": "absolute-path binding defect blocks all platform edits",
+        "ceremony_task_id": "ceremony-0002",
+        "reason": "seat the boundary-enforcing kernel",
         "patch_ref": "sha256:patch-digest",
         "conformance_ref": "sha256:conformance-suite-and-outcome",
         "new_kernel_ref": kernel::kernel_ref(),
@@ -128,7 +127,9 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
     });
     std::fs::write(&manifest, serde_json::to_string_pretty(&manifest_json).unwrap()).unwrap();
 
-    // GATE: the halt binds the manifest bytes and anchors the chain head.
+    // GATE, run WITHOUT --ledger: the ceremony's only ledger records are the
+    // candidate-safe succession events themselves — nothing may sit between
+    // the predecessor's head and the activation.
     let (code, stdout, err) = kernel_in(
         ws.path(),
         &[
@@ -141,29 +142,26 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
             "--action-file",
             "succession.json",
             "--summary",
-            "seat the repaired kernel",
+            "seat the boundary-enforcing kernel",
             "--checkpoints",
             "cp",
-            "--ledger",
-            "events.jsonl",
-            "--playbook-ref",
-            "sha256:pb-old",
         ],
         "",
     );
     assert_eq!(code, 0, "{err}");
     let cp_path = stdout.trim().to_string();
 
-    // An UNPROVEN approval does not seat a governor.
+    // An UNPROVEN approval does not seat a governor. (The refusal is a
+    // candidate-safe Rejected activation — it may open the candidate segment
+    // its eventual approval attests.)
     let (code, _, err) = kernel_in(
         ws.path(),
         &["gate", "approve", "--checkpoint", &cp_path, "--approver", "mallory"],
         "",
     );
     assert_eq!(code, 0, "{err}");
-    let (code, _, err) = kernel_in(
-        ws.path(),
-        &[
+    let activate = |run: &str, extra: &[&str]| {
+        let mut args = vec![
             "succession",
             "activate",
             "--manifest",
@@ -173,12 +171,14 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
             "--ledger",
             "events.jsonl",
             "--run-id",
-            "run-new",
+            run,
             "--playbook-ref",
             "sha256:pb-new",
-        ],
-        "",
-    );
+        ];
+        args.extend_from_slice(extra);
+        kernel_in(ws.path(), &args, "")
+    };
+    let (code, _, err) = activate("run-new", &[]);
     assert_ne!(code, 0);
     assert!(err.contains("succession.approval_unproven"), "{err}");
 
@@ -217,42 +217,18 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
     );
     assert_eq!(code, 0, "{err}");
 
-    // A POST-APPROVAL EDIT of the manifest is the same refusal as a
-    // substituted deploy artifact — and the refusal is recorded.
+    // A POST-APPROVAL EDIT of the manifest is refused and recorded.
     let approved_bytes = std::fs::read(&manifest).unwrap();
     let mut tampered = manifest_json.clone();
     tampered["patch_ref"] = serde_json::json!("sha256:a-different-patch");
     std::fs::write(&manifest, serde_json::to_string_pretty(&tampered).unwrap()).unwrap();
-    let activate = |run: &str| {
-        kernel_in(
-            ws.path(),
-            &[
-                "succession",
-                "activate",
-                "--manifest",
-                "succession.json",
-                "--checkpoint",
-                &cp_path,
-                "--ledger",
-                "events.jsonl",
-                "--run-id",
-                run,
-                "--playbook-ref",
-                "sha256:pb-new",
-                "--trusted-keys",
-                "approvers.toml",
-            ],
-            "",
-        )
-    };
-    let (code, _, err) = activate("run-new");
+    let (code, _, err) = activate("run-new", &["--trusted-keys", "approvers.toml"]);
     assert_ne!(code, 0);
     assert!(err.contains("succession.manifest_mismatch"), "{err}");
 
-    // The approved bytes, restored, ACTIVATE — the successor's event attests
-    // exactly which runtime and which history it succeeded.
+    // The approved bytes, restored, ACTIVATE — adjacent to the exact head.
     std::fs::write(&manifest, approved_bytes).unwrap();
-    let (code, stdout, err) = activate("run-new");
+    let (code, stdout, err) = activate("run-new", &["--trusted-keys", "approvers.toml"]);
     assert_eq!(code, 0, "{err}");
     assert!(stdout.contains("succession activated"), "{stdout}");
 
@@ -262,7 +238,9 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
         .find(|e| e["transition"] == "succession.activate" && e["decision"] == "approved")
         .expect("the activation is evidence");
     assert_eq!(activated["runtime_ref"], serde_json::json!(new_runtime));
-    assert_eq!(activated["task_id"], serde_json::json!(task_id));
+    // The event names the ceremony authority; the maintenance task rides as
+    // a ref beside the mode and both identities.
+    assert_eq!(activated["task_id"], serde_json::json!("ceremony-0002"));
     let refs: Vec<&str> = activated["input_refs"]
         .as_array()
         .unwrap()
@@ -271,25 +249,108 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
         .collect();
     assert!(refs.contains(&format!("old_runtime:{old_runtime}").as_str()));
     assert!(refs.contains(&format!("old_head:{old_head}").as_str()));
+    assert!(refs.contains(&"mode:normal"));
+    assert!(refs.contains(&format!("task:{task_id}").as_str()));
+    assert!(refs.contains(&"ceremony_task:ceremony-0002"));
 
-    // The VERIFIER accepts the boundary as governed: segments appear, and no
-    // unattested-succession warning fires despite the recorded refusals.
+    // Ordinary governance is permitted immediately after activation — and
+    // ONLY for the seated runtime.
+    let (code, _, err) = kernel_in(
+        ws.path(),
+        &[
+            "pre-tool",
+            "--packet",
+            "packet.json",
+            "--ledger",
+            "events.jsonl",
+            "--run-id",
+            "run-new",
+            "--playbook-ref",
+            "sha256:pb-new",
+        ],
+        &serde_json::json!({ "tool_input": { "file_path": "docs/after.md" } }).to_string(),
+    );
+    assert_eq!(code, 0, "the seated runtime governs: {err}");
+
+    // The VERIFIER accepts the boundary as a NORMAL succession — no warning,
+    // no exception, exit success.
     let (code, stdout, err) = kernel_in(
         ws.path(),
         &["ledger", "verify", "--ledger", "events.jsonl"],
         "",
     );
     assert_eq!(code, 0, "{err}");
-    assert!(stdout.contains("runtime segments: 2"), "{stdout}");
     assert!(
-        !stdout.contains("unattested succession"),
-        "the handover is attested: {stdout}"
+        stdout.contains("VALID (normal boundary invariant)"),
+        "{stdout}"
     );
+    assert!(!stdout.contains("unattested"), "{stdout}");
+    assert!(!stdout.contains("EXCEPTION"), "{stdout}");
 
-    // And the counterfactual: the self-trial's shape — the successor's
-    // runtime just starts writing ordinary events, no activation record.
-    // Rebuild that history as its own well-formed ledger and the same
-    // verifier gets loud.
+    // COMPETING CANDIDATE (adversarial 23): a second candidate claiming the
+    // SAME predecessor head cannot also seat itself — the head is no longer
+    // adjacent to its boundary. At most one succession per head.
+    let rival_runtime = kernel::runtime_ref("sha256:pb-rival");
+    let rival = ws.path().join("rival.json");
+    let mut rival_json = manifest_json.clone();
+    rival_json["new_runtime_ref"] = serde_json::json!(rival_runtime);
+    rival_json["new_kernel_ref"] = serde_json::json!(kernel::kernel_ref());
+    std::fs::write(&rival, serde_json::to_string_pretty(&rival_json).unwrap()).unwrap();
+    let (code, stdout, _) = kernel_in(
+        ws.path(),
+        &[
+            "gate",
+            "request",
+            "--gate",
+            "succession",
+            "--run-id",
+            "run-rival",
+            "--action-file",
+            "rival.json",
+            "--checkpoints",
+            "cp",
+        ],
+        "",
+    );
+    assert_eq!(code, 0);
+    let rival_cp = stdout.trim().to_string();
+    let (code, _, err) = kernel_in(
+        ws.path(),
+        &[
+            "gate",
+            "approve",
+            "--checkpoint",
+            &rival_cp,
+            "--approver",
+            "alice",
+        ],
+        "",
+    );
+    assert_eq!(code, 0, "{err}");
+    let (code, _, err) = kernel_in(
+        ws.path(),
+        &[
+            "succession",
+            "activate",
+            "--manifest",
+            "rival.json",
+            "--checkpoint",
+            &rival_cp,
+            "--ledger",
+            "events.jsonl",
+            "--run-id",
+            "run-rival",
+            "--playbook-ref",
+            "sha256:pb-rival",
+            "--allow-unproven",
+        ],
+        "",
+    );
+    assert_ne!(code, 0, "a second succession from the same head must fail");
+    assert!(err.contains("succession-boundary-head-mismatch"), "{err}");
+
+    // SILENT HANDOVER counterfactual: the successor's runtime just starts
+    // writing ordinary events with no activation — the verifier warns.
     let text = std::fs::read_to_string(ws.path().join("events.jsonl")).unwrap();
     let rebuilt = ws.path().join("rebuilt.jsonl");
     for line in text.lines().filter(|l| !l.contains("succession.activate")) {
@@ -305,7 +366,7 @@ fn a_governed_succession_cycle_leaves_an_attested_runtime_boundary() {
         &["ledger", "verify", "--ledger", "rebuilt.jsonl"],
         "",
     );
-    assert_eq!(code, 0, "{err}");
+    assert_eq!(code, 0, "unattested is a warning, not a failure: {err}");
     assert!(
         stdout.contains("unattested succession"),
         "a silent handover must be loud: {stdout}"

@@ -694,7 +694,13 @@ fn harness_readme(prov: &Prov, refs: &Refs) -> GenFile {
          - **Self-protection**: the enforcement artifacts listed in `enforcement.protected` \
            (this tree and the spec) are default-deny like everything else; editing one requires a \
            packet with `amends_enforcement = true`, and `protect_enforcement.sh` blocks a `rm`/`mv` \
-           of them via Bash. Amending enforcement is never an ambient capability.\n\n\
+           of them via Bash. Amending enforcement is never an ambient capability.\n\
+         - **Succession**: replacing the kernel itself is a governed transition, not a \
+           maintenance shortcut — `kernel succession disarm` records the start of the window \
+           under the old runtime, and `kernel succession activate` seats the successor only \
+           against a gate-approved manifest that matches the running binary (see \
+           docs/SUCCESSION.md). `kernel ledger verify` warns on any runtime boundary no \
+           activation attests.\n\n\
          Nothing here claims a guarantee the kernel does not provide.\n",
     );
     GenFile {

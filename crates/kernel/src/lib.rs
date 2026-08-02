@@ -49,6 +49,7 @@ pub mod ledger;
 pub mod obligation;
 pub mod packet;
 pub mod sign;
+pub mod succession;
 pub mod validate;
 
 /// The kernel's own implementation source, embedded at compile time. Hashing
@@ -68,6 +69,7 @@ const KERNEL_SOURCE: &[&str] = &[
     include_str!("obligation.rs"),
     include_str!("packet.rs"),
     include_str!("sign.rs"),
+    include_str!("succession.rs"),
     include_str!("validate.rs"),
     include_str!("intake.rs"),
     include_str!("ledger.rs"),
@@ -160,6 +162,7 @@ pub use packet::{Access, FileScope, IntakeRecord, Priority, Status, TaskPacket};
 pub use sign::{
     approval_message, reverify_signed_approval, trusted_key_for, Keypair, ReverifyError, SignError,
 };
+pub use succession::{unattested_boundaries, SuccessionManifest, UnattestedBoundary};
 pub use validate::{validate, validate_with_protected, Report, Violation};
 
 #[cfg(test)]

@@ -1,8 +1,10 @@
 # Constitutional Succession
 
 > How one trusted runtime hands governance to its successor — the protocol the
-> first self-trial proved missing. Status: **design**, admitted as a task
-> packet through the Intake; not yet implemented.
+> first self-trial proved missing. Status: **implemented** (`kernel succession
+> disarm|activate`, the gate-bound manifest, boundary attestation in
+> `kernel ledger verify`, and the conformance fixture matrix in
+> `crates/kernel/tests/conformance.rs`), under task packet `a6b89a7737f0`.
 
 ## The finding
 
@@ -111,17 +113,45 @@ activate event must say so (`disarm_recorded: false` in the manifest): the
 window's start is then attested only by the successor, which is the residual
 trust made explicit rather than hidden.
 
-## What to build (implementation packet scope)
+## What is built
 
-- `kernel succession disarm|activate` subcommands writing the two events,
-  with the manifest as the gate-bound action document.
-- `kernel ledger verify`: flag runtime-segment boundaries that lack an
-  attesting `succession.activate` record (warning, not failure — history
-  predating the protocol stays legible).
-- A conformance fixture matrix the candidate kernel must pass, versioned so
-  `conformance_ref` names both the suite and the outcome.
-- Generator support so a compiled Playbook documents the succession commands
-  beside the gate it already emits.
+- **`kernel succession disarm`** — refuses a maintenance packet without the
+  `amends_enforcement` grant (recording the refusal,
+  `policy:succession.amendment_required`), records the window's start under
+  the old runtime, and prints the recorded facts (`old_runtime_ref`,
+  `old_kernel_ref`, chain head) a manifest must bind — so the operator
+  authors it from the ledger, not from memory.
+- **`kernel succession activate`** — the successor's first governed event.
+  Refusals are recorded, coded decisions: `succession.manifest_mismatch` (the
+  approved action hash no longer matches the manifest bytes),
+  `succession.not_approved` (gate refusal, incl. failed signature
+  re-verification), `succession.approval_unproven` (a Claimed/Token approval
+  without the explicit `--allow-unproven` override — the running kernel never
+  approves its own successor), `succession.head_missing` (the inherited chain
+  head is gone: history was truncated or rewritten across the window),
+  `succession.kernel_mismatch` / `succession.runtime_mismatch` (the
+  self-attestation step: the activating binary must *be* the approved
+  successor, under the constitution it claims), `succession.no_transition`,
+  and `succession.conformance_failed` (`--check` command failed).
+- **Boundary attestation** — `kernel ledger verify` warns on every
+  runtime-segment boundary whose incoming segment contains no *approved*
+  `succession.activate` naming the runtime it succeeded. A warning, not a
+  failure: history predating the protocol stays legible, but never quiet. A
+  recorded refusal is honestly written under the successor's own runtime, so
+  it may open the segment its eventual approval attests.
+- **The conformance fixture matrix** — `crates/kernel/tests/conformance.rs`:
+  default-deny scope authority, fail-closed absence of authorization,
+  platform-path rebinding at the workspace boundary, never-ambient
+  enforcement amendment, the obligation-to-gate loop, and tamper-evident
+  history. The file's content digest names the suite version a manifest's
+  `conformance_ref` commits to.
+- **Generator support** — the compiled `harness/README.md` documents the
+  succession commands beside the gate.
+
+The full cycle — disarm → manifest → signature approval → tampered-manifest
+refusal → activation → attested boundary, plus the silent-handover
+counterfactual the verifier flags — runs in
+`crates/kernel/tests/succession.rs`.
 
 ## Deliberate non-goals
 

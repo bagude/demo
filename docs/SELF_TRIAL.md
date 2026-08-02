@@ -40,6 +40,23 @@ scratch paths:
 Everything else in the repository — including every file I authored this
 week — is out of scope once armed.
 
+## The mechanical twin
+
+Every row below also exists as a deterministic CI test that drives the
+**same generated hook scripts** with the same JSON payloads, env contract,
+and exit-code protocol — no agent in the loop:
+
+```sh
+cargo test -p harness-kernel --test conformance
+```
+
+The two are complementary and neither substitutes for the other: the
+conformance suite proves the enforcement semantics of the exact artifacts
+in the tree, repeatably; the live trial proves those artifacts actually
+**bind** to a real agent's tool calls in a real session. A harness can pass
+the first and fail the second (as this session's own history shows — the
+hooks were firing all along, failing unresolved, and governing nothing).
+
 ## Test matrix
 
 Each test names the actor's real action, the expected enforcement, and the

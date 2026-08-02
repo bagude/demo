@@ -9,6 +9,17 @@
 harness:
   name: enablement-workbench
   version: 0.1.0
+  # The trusted computing base of this self-hosting workspace, beyond the
+  # generated tree the backend protects by itself. A packet whose write scope
+  # intersects any of these is an enforcement amendment BY DERIVATION — the
+  # Intake refuses it unless amends_enforcement is declared, and the Guard
+  # requires the same grant at edit time. The self-trial proved the need: a
+  # repair packet rewrote the kernel's Guard while classified as ordinary work.
+  protected:
+    - crates/kernel/
+    - crates/spec/
+    - crates/harnessc/
+    - Cargo.lock
 
 composition:
   expression: "Intake -> Verb within (Law + Gate) + Ledger"

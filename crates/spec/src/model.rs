@@ -26,6 +26,16 @@ pub struct SpecFile {
 pub struct HarnessMeta {
     pub name: String,
     pub version: String,
+    /// Additional protected enforcement-artifact prefixes, beyond the paths
+    /// the backend itself generates. This is where a **self-hosting** spec
+    /// declares its trusted computing base — the kernel source, the compiler
+    /// source, the dependency lock — so that editing the enforcement
+    /// *implementation* requires the same explicit `amends_enforcement` grant
+    /// as editing the generated tree. Membership in the TCB is declared by the
+    /// spec and enforced by the kernel; it is never inferred from a packet's
+    /// own claims.
+    #[serde(default)]
+    pub protected: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -614,7 +614,7 @@ pub fn event_schema() -> Value {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "Event",
         "type": "object",
-        "required": ["seq", "prev", "run_id", "action_id", "actor", "timestamp", "transition", "stage", "decision", "playbook_ref", "kernel_ref"],
+        "required": ["seq", "prev", "run_id", "action_id", "actor", "timestamp", "transition", "stage", "decision", "playbook_ref", "kernel_ref", "runtime_ref"],
         "properties": {
             "seq": { "type": "integer", "minimum": 0 },
             "prev": { "type": "string" },
@@ -632,6 +632,7 @@ pub fn event_schema() -> Value {
             "evidence_refs": { "type": "array", "items": { "type": "string" } },
             "playbook_ref": { "type": "string" },
             "kernel_ref": { "type": "string" },
+            "runtime_ref": { "type": "string" },
             "attempt_id": { "type": "string" }
         }
     })
@@ -750,6 +751,7 @@ mod tests {
             .collect();
         assert!(required.contains(&"playbook_ref"));
         assert!(required.contains(&"kernel_ref"));
+        assert!(required.contains(&"runtime_ref"));
         assert!(required.contains(&"seq"));
         assert!(required.contains(&"prev"));
     }

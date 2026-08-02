@@ -52,8 +52,49 @@ impl Report {
 }
 
 /// Run every Guard Law against `packet` and collect all violations.
+///
+/// Equivalent to [`validate_with_protected`] with an empty protected set —
+/// callers that know the enforcement TCB should prefer that form, which also
+/// mechanically derives whether the packet amends enforcement.
 pub fn validate(packet: &TaskPacket) -> Report {
+    validate_with_protected(packet, &[])
+}
+
+/// [`validate`], plus the **mechanical derivation of `amends_enforcement`**.
+///
+/// Whether a packet amends enforcement is a fact about its write scope, not a
+/// claim its author gets to make: a scope that intersects the protected
+/// enforcement set (the kernel, the compiler, the spec, the generated tree)
+/// IS an enforcement amendment, whatever the flag says. The self-trial's
+/// repair packet demonstrated the hole — it rewrote the kernel's Guard while
+/// declaring `amends_enforcement: false`, and admission accepted the
+/// self-classification. Here the flag must match the derived fact, so a
+/// packet cannot classify TCB surgery as ordinary work.
+pub fn validate_with_protected(packet: &TaskPacket, protected: &[String]) -> Report {
     let mut v = Vec::new();
+
+    if !packet.amends_enforcement {
+        for f in &packet.files {
+            if f.access != crate::packet::Access::Write {
+                continue;
+            }
+            if let Some(hit) = protected
+                .iter()
+                .find(|p| crate::packet::scopes_overlap(p, &f.path))
+            {
+                v.push(Violation::new(
+                    "enforcement.amendment_undeclared",
+                    format!(
+                        "write scope '{}' intersects protected enforcement artifact '{hit}'; \
+                         such a packet amends enforcement and must declare \
+                         amends_enforcement = true — the classification is derived from the \
+                         scope, not chosen by the submitter",
+                        f.path
+                    ),
+                ));
+            }
+        }
+    }
 
     if packet.title.trim().is_empty() {
         v.push(Violation::new("title.empty", "title must not be empty"));
@@ -204,6 +245,47 @@ mod tests {
             .violations
             .iter()
             .any(|v| v.code == "files.duplicate_path"));
+    }
+
+    #[test]
+    fn a_scope_intersecting_the_protected_set_must_declare_amendment() {
+        // The self-trial's hole: a packet scoping kernel source while claiming
+        // amends_enforcement = false was admitted as ordinary work. The
+        // classification is now derived from the scope.
+        let protected: Vec<String> = vec!["crates/kernel/".into(), "harness/".into()];
+        let mut p = valid();
+        p.files.push(FileScope::write("crates/kernel/src/law.rs"));
+        let report = validate_with_protected(&p, &protected);
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.code == "enforcement.amendment_undeclared"));
+
+        // Declaring the grant makes the same packet admissible again.
+        p.amends_enforcement = true;
+        assert!(validate_with_protected(&p, &protected).is_ok());
+
+        // A directory-scope grant covering a protected region is caught too:
+        // `crates/` grants writes inside `crates/kernel/`.
+        let mut broad = valid();
+        broad.files.push(FileScope::write("crates/"));
+        let report = validate_with_protected(&broad, &protected);
+        assert!(report
+            .violations
+            .iter()
+            .any(|v| v.code == "enforcement.amendment_undeclared"));
+
+        // Read scope over a protected artifact is not an amendment.
+        let mut reader = valid();
+        reader.files.push(FileScope::read("crates/kernel/src/law.rs"));
+        assert!(validate_with_protected(&reader, &protected).is_ok());
+
+        // And an empty protected set derives nothing (plain validate()).
+        let mut unprotected = valid();
+        unprotected
+            .files
+            .push(FileScope::write("crates/kernel/src/law.rs"));
+        assert!(validate(&unprotected).is_ok());
     }
 
     #[test]

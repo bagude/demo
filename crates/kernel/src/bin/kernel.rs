@@ -534,18 +534,34 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => {
             let mut stdin = String::new();
             std::io::stdin().read_to_string(&mut stdin).ok();
-            let path = extract_target_path(&stdin);
+            let run_id = effective_run_id(&run_id, &stdin);
+            // Recorded workspace-relative like the Guard's evidence, so an
+            // action-scoped discharge (`validate --path <rel>`) matches the
+            // key this event opened.
+            let path = extract_target_path(&stdin).map(|p| {
+                kernel::fsutil::workspace_relative(std::path::Path::new("."), &p).unwrap_or(p)
+            });
             // The event carries the key its declared scope reads at eval time.
             let (task_id, scope_refs) =
                 scope_recording(&scope, packet.as_deref(), instance.as_deref())?;
+            // Even when the scope key is not the task, the event names the
+            // admitted packet it served — identity binding, not scope keying.
+            let task_id = task_id.or_else(|| {
+                packet
+                    .as_deref()
+                    .and_then(|p| load_packet(p).ok())
+                    .map(|p| packet_task_id(&p))
+            });
+            let action_key = path.clone().unwrap_or_else(|| "-".into());
             let mut input_refs: Vec<String> =
                 path.map(|p| format!("path:{p}")).into_iter().collect();
             input_refs.extend(scope_refs);
+            let playbook = playbook_ref.unwrap_or_default();
             let event = Event {
                 run_id,
                 task_id,
                 parent_task_id: None,
-                action_id: "post_tool".into(),
+                action_id: format!("post_tool:{action_key}"),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: format!("post_tool.obligation.{obligation}"),
@@ -554,9 +570,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs: vec![],
-                playbook_ref: playbook_ref.unwrap_or_default(),
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook,
                 kernel_ref: kernel::kernel_ref(),
-                attempt_id: None,
+                attempt_id: Some(attempt_nonce()),
             };
             EventLog::at(&ledger).append(&event)?;
             Ok(ExitCode::SUCCESS)
@@ -575,52 +592,104 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             if !is_git_commit(&stdin) {
                 return Ok(ExitCode::SUCCESS);
             }
-            let events = EventLog::at(&ledger).read_all().unwrap_or_default();
-            let ctx = kernel::obligation::ScopeContext {
-                run_id: run_id.clone(),
-                task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
-                branch: current_branch(),
-                // A commit gate is not an instance; open instance debt blocks
-                // it fail-safe.
-                instance: None,
+            let run_id = effective_run_id(&run_id, &stdin);
+            let task_id = packet
+                .as_deref()
+                .and_then(|p| load_packet(p).ok())
+                .map(|p| packet_task_id(&p));
+
+            // Fail closed on an unbound run identity. Run-scoped debt is keyed
+            // by run_id; under the legacy `unknown` fallback every concurrent
+            // session shares one bucket, so one session could inherit — or
+            // launder away — another's obligations, and under the
+            // per-invocation `unbound-$PPID` last resort a session's own debt
+            // fragments into invisible one-event runs. Debt that cannot be
+            // attributed cannot be evaluated, so the gate refuses both.
+            let run_unbound =
+                run_id.is_empty() || run_id == "unknown" || run_id.starts_with("unbound-");
+            let (allowed, evidence_refs, denial_message, input_refs) = if run_unbound {
+                let reason = format!(
+                    "run identity is '{}' — the ambiguous fallback; run-scoped obligations \
+                     cannot be attributed to a run, so the commit gate fails closed. Bind a \
+                     real run id (the generated hooks derive one when the session exposes \
+                     none).",
+                    if run_id.is_empty() { "(empty)" } else { &run_id }
+                );
+                (
+                    false,
+                    vec![
+                        format!("policy:{}", kernel::law::codes::RUN_UNBOUND),
+                        format!("reason:{reason}"),
+                    ],
+                    format!("blocked by approve-commit gate: {reason}"),
+                    vec![],
+                )
+            } else {
+                let events = EventLog::at(&ledger).read_all().unwrap_or_default();
+                let ctx = kernel::obligation::ScopeContext {
+                    run_id: run_id.clone(),
+                    task_key: packet.as_deref().and_then(|p| hash_file(p).ok()),
+                    branch: current_branch(),
+                    // A commit gate is not an instance; open instance debt blocks
+                    // it fail-safe.
+                    instance: None,
+                };
+                let outstanding = kernel::obligation::outstanding(&events, &require, &ctx);
+                let allowed = outstanding.is_empty();
+                let reason = format!(
+                    "obligation(s) outstanding: {}. Run the validation step to discharge \
+                     before committing.",
+                    outstanding.join(", ")
+                );
+                let evidence_refs = if allowed {
+                    vec![]
+                } else {
+                    vec![
+                        format!("policy:{}", kernel::law::codes::OBLIGATION_OUTSTANDING),
+                        format!("reason:{reason}"),
+                    ]
+                };
+                (
+                    allowed,
+                    evidence_refs,
+                    format!("blocked by approve-commit gate: {reason}"),
+                    outstanding
+                        .iter()
+                        .map(|o| format!("obligation:{o}"))
+                        .collect(),
+                )
             };
-            let outstanding = kernel::obligation::outstanding(&events, &require, &ctx);
-            let allowed = outstanding.is_empty();
             // The decision is evidence either way: which obligations stood in
             // the way of a denial is exactly what an audit needs to see.
+            let nonce = attempt_nonce();
+            let playbook = playbook_ref.unwrap_or_default();
             let event = Event {
                 run_id: run_id.clone(),
-                task_id: None,
+                task_id,
                 parent_task_id: None,
-                action_id: "pre_commit".into(),
+                action_id: format!("pre_commit:{nonce}"),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: "gate.pre_commit".into(),
                 stage: Stage::Authorized.as_str().into(),
-                input_refs: outstanding
-                    .iter()
-                    .map(|o| format!("obligation:{o}"))
-                    .collect(),
+                input_refs,
                 output_refs: vec![],
                 decision: if allowed {
                     Decision::Allowed
                 } else {
                     Decision::Denied
                 },
-                evidence_refs: vec![],
-                playbook_ref: playbook_ref.unwrap_or_default(),
+                evidence_refs,
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook,
                 kernel_ref: kernel::kernel_ref(),
-                attempt_id: None,
+                attempt_id: Some(nonce),
             };
             EventLog::at(&ledger).append(&event)?;
             if allowed {
                 Ok(ExitCode::SUCCESS)
             } else {
-                eprintln!(
-                    "blocked by approve-commit gate: obligation(s) outstanding: {}. \
-                     Run the validation step to discharge before committing.",
-                    outstanding.join(", ")
-                );
+                eprintln!("{denial_message}");
                 Ok(ExitCode::from(2))
             }
         }
@@ -655,6 +724,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             // it clears nothing.
             let (task_id, scope_refs) =
                 scope_recording(&scope, packet.as_deref(), instance.as_deref())?;
+            let task_id = task_id.or_else(|| {
+                packet
+                    .as_deref()
+                    .and_then(|p| load_packet(p).ok())
+                    .map(|p| packet_task_id(&p))
+            });
             let mut input_refs: Vec<String> =
                 path.map(|p| format!("path:{p}")).into_iter().collect();
             input_refs.extend(scope_refs);
@@ -663,11 +738,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .map(|c| format!("check:{c}"))
                 .into_iter()
                 .collect();
+            let playbook = playbook_ref.unwrap_or_default();
             let event = Event {
                 run_id,
                 task_id,
                 parent_task_id: None,
-                action_id: "validate".into(),
+                action_id: format!("validate:{obligation}"),
                 actor: "kernel".into(),
                 timestamp: now_rfc3339(),
                 transition: kernel::obligation::discharge_transition(&obligation),
@@ -676,9 +752,10 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: Decision::Recorded,
                 evidence_refs,
-                playbook_ref: playbook_ref.unwrap_or_default(),
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook,
                 kernel_ref: kernel::kernel_ref(),
-                attempt_id: None,
+                attempt_id: Some(attempt_nonce()),
             };
             EventLog::at(&ledger).append(&event)?;
             println!("discharged obligation '{obligation}'");
@@ -753,11 +830,22 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 if let Some(id) = &spawn_id {
                     input_refs.push(format!("spawn:{id}"));
                 }
+                let evidence_refs = match &outcome {
+                    Ok(_) => vec![],
+                    Err(e) => vec![
+                        format!("policy:{}", kernel::law::codes::HIVE_REFUSED),
+                        format!("reason:{e}"),
+                    ],
+                };
+                let playbook = playbook_ref.unwrap_or_default();
                 let event = Event {
                     run_id: run_id.clone(),
                     task_id: None,
                     parent_task_id: None,
-                    action_id: "hive_spawn".into(),
+                    action_id: format!(
+                        "hive_spawn:{}",
+                        spawn_id.as_deref().unwrap_or(&req.parent)
+                    ),
                     actor: "kernel".into(),
                     timestamp: now_rfc3339(),
                     transition: "hive.spawn".into(),
@@ -769,10 +857,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                     } else {
                         Decision::Denied
                     },
-                    evidence_refs: vec![],
-                    playbook_ref: playbook_ref.unwrap_or_default(),
+                    evidence_refs,
+                    runtime_ref: kernel::runtime_ref(&playbook),
+                    playbook_ref: playbook,
                     kernel_ref: kernel::kernel_ref(),
-                    attempt_id: None,
+                    attempt_id: Some(attempt_nonce()),
                 };
                 EventLog::at(ledger).append(&event)?;
             }
@@ -819,11 +908,19 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 let result = kernel::hive::BudgetPool::at(&store, &hive).settle(&spawn_id, spent);
                 if let Some(ledger) = &ledger {
                     // Settlement — including a refused overspend — is evidence.
+                    let evidence_refs = match &result {
+                        Ok(_) => vec![],
+                        Err(e) => vec![
+                            format!("policy:{}", kernel::law::codes::HIVE_SETTLEMENT_REFUSED),
+                            format!("reason:{e}"),
+                        ],
+                    };
+                    let playbook = playbook_ref.unwrap_or_default();
                     let event = Event {
                         run_id: run_id.clone(),
                         task_id: None,
                         parent_task_id: None,
-                        action_id: "hive_settle".into(),
+                        action_id: format!("hive_settle:{spawn_id}"),
                         actor: "kernel".into(),
                         timestamp: now_rfc3339(),
                         transition: "hive.settle".into(),
@@ -835,10 +932,11 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                         } else {
                             Decision::Denied
                         },
-                        evidence_refs: vec![],
-                        playbook_ref: playbook_ref.unwrap_or_default(),
+                        evidence_refs,
+                        runtime_ref: kernel::runtime_ref(&playbook),
+                        playbook_ref: playbook,
                         kernel_ref: kernel::kernel_ref(),
-                        attempt_id: None,
+                        attempt_id: Some(attempt_nonce()),
                     };
                     EventLog::at(ledger).append(&event)?;
                 }
@@ -946,6 +1044,33 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                             .map(|h| format!(", head {h}"))
                             .unwrap_or_default()
                     );
+                    // The chain proves integrity; the runtime partition proves
+                    // WHO governed. Each segment is a contiguous span of
+                    // history written under one runtime constitution
+                    // (playbook + kernel + ABI as one digest) — a mid-history
+                    // kernel or playbook swap is a visible boundary here, not
+                    // a field-diffing exercise.
+                    let events = EventLog::at(&ledger).read_all().unwrap_or_default();
+                    let mut segments: Vec<(String, usize)> = Vec::new();
+                    for ev in &events {
+                        let key = if ev.runtime_ref.is_empty() {
+                            "(unbound: pre-runtime_ref or foreign record)".to_string()
+                        } else {
+                            ev.runtime_ref.clone()
+                        };
+                        match segments.last_mut() {
+                            Some((k, n)) if *k == key => *n += 1,
+                            _ => segments.push((key, 1)),
+                        }
+                    }
+                    if !segments.is_empty() {
+                        println!("runtime segments: {}", segments.len());
+                        let mut start = 0usize;
+                        for (k, n) in &segments {
+                            println!("  records {start}..{} under {k}", start + n - 1);
+                            start += n;
+                        }
+                    }
                     Ok(ExitCode::SUCCESS)
                 }
                 Err(e) => {
@@ -970,6 +1095,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => {
             let stage =
                 Stage::parse(&stage).ok_or_else(|| format!("unknown lifecycle stage '{stage}'"))?;
+            let playbook = playbook_ref.unwrap_or_default();
             let event = Event {
                 run_id,
                 task_id,
@@ -983,7 +1109,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 output_refs: vec![],
                 decision: decision.into(),
                 evidence_refs,
-                playbook_ref: playbook_ref.unwrap_or_default(),
+                runtime_ref: kernel::runtime_ref(&playbook),
+                playbook_ref: playbook,
                 kernel_ref: kernel::kernel_ref(),
                 attempt_id,
             };
@@ -1002,11 +1129,33 @@ fn pre_tool(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut stdin = String::new();
     std::io::stdin().read_to_string(&mut stdin)?;
+    let run_id = &effective_run_id(run_id, &stdin);
     let path = extract_target_path(&stdin);
 
     // A tool call with no file target is outside this law's scope.
-    let Some(path) = path else {
+    let Some(supplied) = path else {
         return Ok(ExitCode::SUCCESS);
+    };
+
+    // Rebind the platform shape before any policy reasoning: tool harnesses
+    // hand over absolute host paths, while authority is judged
+    // workspace-relative. An absolute path inside the workspace becomes its
+    // relative form; one outside the workspace is refused with its own code —
+    // not mislabelled as "absolute", which the self-trial showed blocks every
+    // legitimate platform edit.
+    let path = match kernel::fsutil::workspace_relative(std::path::Path::new("."), &supplied) {
+        Ok(rel) => rel,
+        Err((code, reason)) => {
+            return deny_edit(
+                ledger,
+                run_id,
+                playbook_ref.as_deref(),
+                &supplied,
+                None,
+                code,
+                &reason,
+            );
+        }
     };
 
     // The Guard's fail-safe: absent or unreadable authorization is NO
@@ -1017,11 +1166,13 @@ fn pre_tool(
     let packet = match load_packet(packet_path) {
         Ok(p) => p,
         Err(e) => {
-            return deny_without_authorization(
+            return deny_edit(
                 ledger,
                 run_id,
                 playbook_ref.as_deref(),
-                &path,
+                &supplied,
+                None,
+                kernel::law::codes::NO_ACTIVE_PACKET,
                 &format!(
                     "no active task packet ({e}); work enters this harness only as an \
                      admitted packet — submit one through the Intake and activate it"
@@ -1042,22 +1193,31 @@ fn pre_tool(
         Enforcement::Deny(_) => (Decision::Denied, "pre_tool.edit"),
     };
 
-    // Evidence names the real target too: an allowed write through a symlink
-    // must be attributable to where it actually landed.
-    let mut input_refs = vec![format!("path:{path}")];
+    // Evidence names what was asked for AND where it really lands: the
+    // supplied (possibly platform-shaped) path, plus the canonical
+    // workspace-relative target when the spelling differs.
+    let mut input_refs = vec![format!("path:{supplied}")];
     if let Ok(canonical) = kernel::fsutil::canonical_workspace_rel(std::path::Path::new("."), &path)
     {
-        if canonical != path {
+        if canonical != supplied {
             input_refs.push(format!("canonical:{canonical}"));
         }
     }
 
     if let Some(ledger) = ledger {
+        let evidence_refs = match &verdict {
+            Enforcement::Deny(denial) => vec![
+                format!("policy:{}", denial.code),
+                format!("reason:{}", denial.reason),
+            ],
+            _ => vec![],
+        };
+        let playbook = playbook_ref.unwrap_or_default();
         let event = Event {
             run_id: run_id.to_string(),
-            task_id: None,
+            task_id: Some(packet_task_id(&packet)),
             parent_task_id: None,
-            action_id: "pre_tool".into(),
+            action_id: format!("pre_tool:{path}"),
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: transition.into(),
@@ -1065,10 +1225,11 @@ fn pre_tool(
             input_refs: input_refs.clone(),
             output_refs: vec![],
             decision,
-            evidence_refs: vec![],
-            playbook_ref: playbook_ref.unwrap_or_default(),
+            evidence_refs,
+            runtime_ref: kernel::runtime_ref(&playbook),
+            playbook_ref: playbook,
             kernel_ref: kernel::kernel_ref(),
-            attempt_id: None,
+            attempt_id: Some(attempt_nonce()),
         };
         EventLog::at(ledger).append(&event)?;
     }
@@ -1081,8 +1242,11 @@ fn pre_tool(
             );
             Ok(ExitCode::SUCCESS)
         }
-        Enforcement::Deny(reason) => {
-            eprintln!("blocked by enforce-file-scope: {reason}");
+        Enforcement::Deny(denial) => {
+            eprintln!(
+                "blocked by enforce-file-scope [{}]: {}",
+                denial.code, denial.reason
+            );
             // Exit code 2 is Claude Code's signal to block the tool call and
             // surface stderr to the model.
             Ok(ExitCode::from(2))
@@ -1101,6 +1265,7 @@ fn pre_bash(
 
     let mut stdin = String::new();
     std::io::stdin().read_to_string(&mut stdin).ok();
+    let run_id = &effective_run_id(run_id, &stdin);
     let command = extract_command(&stdin).unwrap_or_default();
 
     let Some(hit) = kernel::law::bash_hits_protected(&command, &protected) else {
@@ -1110,14 +1275,30 @@ fn pre_bash(
     // A destructive command touches a protected artifact. Allow only under an
     // explicit amends_enforcement grant.
     let packet = load_packet(packet_path).ok();
-    let granted = packet.map(|p| p.amends_enforcement).unwrap_or(false);
+    let granted = packet
+        .as_ref()
+        .map(|p| p.amends_enforcement)
+        .unwrap_or(false);
+    let reason = format!(
+        "this command would destructively modify protected enforcement artifact '{hit}'. \
+         Amending enforcement requires a task packet with amends_enforcement = true."
+    );
 
     if let Some(ledger) = ledger {
+        let evidence_refs = if granted {
+            vec![]
+        } else {
+            vec![
+                format!("policy:{}", kernel::law::codes::PROTECTED_DESTRUCTIVE),
+                format!("reason:{reason}"),
+            ]
+        };
+        let playbook = playbook_ref.unwrap_or_default();
         let event = Event {
             run_id: run_id.to_string(),
-            task_id: None,
+            task_id: packet.as_ref().map(packet_task_id),
             parent_task_id: None,
-            action_id: "pre_bash".into(),
+            action_id: format!("pre_bash:{hit}"),
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: "pre_bash.protected".into(),
@@ -1129,10 +1310,11 @@ fn pre_bash(
             } else {
                 Decision::Denied
             },
-            evidence_refs: vec![],
-            playbook_ref: playbook_ref.unwrap_or_default(),
+            evidence_refs,
+            runtime_ref: kernel::runtime_ref(&playbook),
+            playbook_ref: playbook,
             kernel_ref: kernel::kernel_ref(),
-            attempt_id: None,
+            attempt_id: Some(attempt_nonce()),
         };
         EventLog::at(ledger).append(&event)?;
     }
@@ -1143,34 +1325,33 @@ fn pre_bash(
         );
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!(
-            "blocked by self-protection: this command would destructively modify protected \
-             enforcement artifact '{hit}'. Amending enforcement requires a task packet with \
-             amends_enforcement = true."
-        );
+        eprintln!("blocked by self-protection: {reason}");
         Ok(ExitCode::from(2))
     }
 }
 
-/// Load protected path prefixes from a file (one per line; `#` comments and
-/// blanks ignored). Missing file → empty set.
-/// Refuse a tool call because no authorization exists to judge it against,
-/// recording the refusal as evidence. Failing to record does not un-block:
-/// the deny (exit 2) stands even if the ledger append fails — a fail-safe
-/// guard must never degrade into a warning because its own bookkeeping did.
-fn deny_without_authorization(
+/// Refuse an edit before scope evaluation could even run (no authorization
+/// exists, or the path's shape is refused outright), recording the refusal —
+/// with its stable `policy:` code — as evidence. Failing to record does not
+/// un-block: the deny (exit 2) stands even if the ledger append fails — a
+/// fail-safe guard must never degrade into a warning because its own
+/// bookkeeping did.
+fn deny_edit(
     ledger: Option<&std::path::Path>,
     run_id: &str,
     playbook_ref: Option<&str>,
     path: &str,
+    task_id: Option<String>,
+    code: &str,
     reason: &str,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     if let Some(ledger) = ledger {
+        let playbook = playbook_ref.unwrap_or_default().to_string();
         let event = Event {
             run_id: run_id.to_string(),
-            task_id: None,
+            task_id,
             parent_task_id: None,
-            action_id: "pre_tool".into(),
+            action_id: format!("pre_tool:{path}"),
             actor: "kernel".into(),
             timestamp: now_rfc3339(),
             transition: "pre_tool.edit".into(),
@@ -1178,19 +1359,22 @@ fn deny_without_authorization(
             input_refs: vec![format!("path:{path}")],
             output_refs: vec![],
             decision: Decision::Denied,
-            evidence_refs: vec![format!("reason:{reason}")],
-            playbook_ref: playbook_ref.unwrap_or_default().into(),
+            evidence_refs: vec![format!("policy:{code}"), format!("reason:{reason}")],
+            runtime_ref: kernel::runtime_ref(&playbook),
+            playbook_ref: playbook,
             kernel_ref: kernel::kernel_ref(),
-            attempt_id: None,
+            attempt_id: Some(attempt_nonce()),
         };
         if let Err(e) = EventLog::at(ledger).append(&event) {
             eprintln!("warning: could not record the refusal: {e}");
         }
     }
-    eprintln!("blocked by enforce-file-scope: {reason}");
+    eprintln!("blocked by enforce-file-scope [{code}]: {reason}");
     Ok(ExitCode::from(2))
 }
 
+/// Load protected path prefixes from a file (one per line; `#` comments and
+/// blanks ignored). Missing file → empty set.
 fn load_protected(
     path: Option<&std::path::Path>,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -1573,11 +1757,23 @@ fn record_gate_event(
         input_refs.push(format!("instance:{i}"));
     }
     input_refs.extend(extra_refs);
+    // The logical action is this gate deciding on this action; the digest
+    // suffix keeps two checkpoints of one gate distinguishable.
+    let hash_tail: String = cp
+        .action_hash
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(12)
+        .collect();
+    let playbook = playbook_ref.unwrap_or_default().to_string();
     let event = Event {
         run_id: cp.run_id.clone(),
         task_id: cp.task_id.clone(),
         parent_task_id: None,
-        action_id: format!("gate_{}", transition.trim_start_matches("gate.")),
+        action_id: format!(
+            "gate_{}:{hash_tail}",
+            transition.trim_start_matches("gate.")
+        ),
         actor: "kernel".into(),
         timestamp: now_rfc3339(),
         transition: transition.into(),
@@ -1586,9 +1782,10 @@ fn record_gate_event(
         output_refs: vec![],
         decision,
         evidence_refs,
-        playbook_ref: playbook_ref.unwrap_or_default().to_string(),
+        runtime_ref: kernel::runtime_ref(&playbook),
+        playbook_ref: playbook,
         kernel_ref: kernel::kernel_ref(),
-        attempt_id: None,
+        attempt_id: Some(attempt_nonce()),
     };
     EventLog::at(ledger).append(&event)?;
     Ok(())
@@ -1677,6 +1874,36 @@ fn load_packet(path: &std::path::Path) -> Result<TaskPacket, Box<dyn std::error:
     })
 }
 
+/// The run identity a governed event should carry, resolved from what the
+/// caller passed and what the tool-call payload proves.
+///
+/// The CLI value wins when it is a *real* identity (the generated hooks pass
+/// `CLAUDE_SESSION_ID` when the platform exports it). When it is a fallback —
+/// empty, the legacy `unknown`, or the `unbound-$PPID` last resort — the
+/// payload's own `session_id` is used instead: hook payloads carry the
+/// session identity even where the environment does not, and the live
+/// self-trial showed the parent-pid fallback fragments one session into a
+/// different "run" per hook invocation, which would make run-scoped debt
+/// invisible to the commit gate (a fail-open, worse than the shared-bucket
+/// problem it replaced).
+fn effective_run_id(cli_run_id: &str, stdin: &str) -> String {
+    let weak = cli_run_id.is_empty()
+        || cli_run_id == "unknown"
+        || cli_run_id.starts_with("unbound-");
+    if !weak {
+        return cli_run_id.to_string();
+    }
+    serde_json::from_str::<serde_json::Value>(stdin)
+        .ok()
+        .and_then(|v| {
+            v.get("session_id")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| cli_run_id.to_string())
+}
+
 /// Pull the Bash command string out of a tool-call JSON payload.
 fn extract_command(stdin: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(stdin).ok()?;
@@ -1734,4 +1961,35 @@ fn hash_file(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error
         hex.push_str(&format!("{b:02x}"));
     }
     Ok(hex)
+}
+
+/// The admitted identity of the packet in hand — the same derivation the
+/// Intake stamps on an `IntakeRecord` (canonical content hash, first 12 hex
+/// chars), so guard and gate events name the packet the Intake admitted.
+/// (Task-*scoped* obligation events keep their established key, the packet
+/// *file* digest — that is a scope key, not the task's identity.)
+fn packet_task_id(packet: &TaskPacket) -> String {
+    kernel::packet::content_hash(packet)[..12].to_string()
+}
+
+/// A unique id for one execution attempt: wall clock + pid + an in-process
+/// counter, digested. Uniqueness is the requirement, not secrecy — this is
+/// what lets two evaluations of the same logical action stay distinguishable
+/// in the Ledger instead of collapsing into one reused label.
+fn attempt_nonce() -> String {
+    use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let raw = format!("{nanos}:{}:{n}", std::process::id());
+    let digest = Sha256::digest(raw.as_bytes());
+    let mut s = String::with_capacity(16);
+    for b in &digest[..8] {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }

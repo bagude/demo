@@ -48,6 +48,38 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Re-express an absolute path as workspace-relative, or `None` if it lies
+/// outside the root. The textual prefix may differ from the canonical root
+/// (a symlinked working directory), so after the cheap lexical strip this
+/// resolves the path's own canonical form — or its parent's, for a
+/// not-yet-existing target — before giving up. Symlink *content* is not
+/// trusted here: the caller's component walk re-resolves every link.
+fn rebase_into_root(root_canon: &Path, path: &str) -> Option<String> {
+    let p = Path::new(path);
+    let to_rel = |rel: &Path| -> String {
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    if let Ok(rel) = p.strip_prefix(root_canon) {
+        return Some(to_rel(rel));
+    }
+    if let Ok(canon) = fs::canonicalize(p) {
+        if let Ok(rel) = canon.strip_prefix(root_canon) {
+            return Some(to_rel(rel));
+        }
+    }
+    if let (Some(parent), Some(name)) = (p.parent(), p.file_name()) {
+        if let Ok(parent_canon) = fs::canonicalize(parent) {
+            if let Ok(rel) = parent_canon.join(name).strip_prefix(root_canon) {
+                return Some(to_rel(rel));
+            }
+        }
+    }
+    None
+}
+
 /// A same-directory temp name unique to this process and call, so concurrent
 /// writers to the same target never collide on the temp file.
 fn unique_tmp_sibling(path: &Path) -> PathBuf {
@@ -72,13 +104,39 @@ fn unique_tmp_sibling(path: &Path) -> PathBuf {
 /// `canonicalize` reports on-disk casing (best-effort by construction; on
 /// case-sensitive filesystems there is nothing to normalize).
 pub fn canonical_workspace_rel(root: &Path, path: &str) -> Result<String, String> {
+    let root_canon = fs::canonicalize(root)
+        .map_err(|e| format!("workspace root cannot be canonicalized: {e}"))?;
+
+    // Platform file tools address their targets ABSOLUTELY. An absolute path
+    // inside the workspace root asks the same authority question as its
+    // relative form — rebase it and judge normally; one outside the root is
+    // refused. Found live, not mechanically: the first armed session blocked
+    // every legitimate edit because the platform's payloads are absolute
+    // while this judgment was relative-only — and the conformance suite,
+    // driving relative payloads, stayed green throughout. (The suite now
+    // drives absolute payloads too.)
+    let rebased;
+    let path = if Path::new(path).is_absolute() {
+        match rebase_into_root(&root_canon, path) {
+            Some(rel) => {
+                rebased = rel;
+                rebased.as_str()
+            }
+            None => {
+                return Err(format!(
+                    "'{path}' is outside the workspace root; such paths are never authorized"
+                ))
+            }
+        }
+    } else {
+        path
+    };
+
     let Some(components) = crate::packet::normalize_components(path) else {
         return Err(format!(
             "'{path}' is absolute or escapes the workspace root; such paths are never authorized"
         ));
     };
-    let root_canon = fs::canonicalize(root)
-        .map_err(|e| format!("workspace root cannot be canonicalized: {e}"))?;
 
     // Walk the deepest existing prefix, following symlinks as they appear so
     // every later component is resolved relative to the REAL directory.
@@ -159,5 +217,49 @@ mod tests {
         atomic_write(&target, b"first").unwrap();
         atomic_write(&target, b"second").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"second");
+    }
+
+    #[test]
+    fn absolute_paths_inside_the_root_are_rebased_not_refused() {
+        // The platform's file tools speak absolute paths. Judged authority
+        // must be identical for the absolute and relative spellings of the
+        // same target — the live trial found the absolute form refused
+        // wholesale while the relative-only mechanical suite stayed green.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(dir.path().join("docs/notes.md"), b"x").unwrap();
+
+        let abs = dir.path().join("docs/notes.md");
+        let via_abs = canonical_workspace_rel(dir.path(), abs.to_str().unwrap()).unwrap();
+        let via_rel = canonical_workspace_rel(dir.path(), "docs/notes.md").unwrap();
+        assert_eq!(via_abs, "docs/notes.md");
+        assert_eq!(via_abs, via_rel, "one target, one judgment");
+
+        // A not-yet-existing target rebases through its parent.
+        let abs_new = dir.path().join("docs/new.md");
+        assert_eq!(
+            canonical_workspace_rel(dir.path(), abs_new.to_str().unwrap()).unwrap(),
+            "docs/new.md"
+        );
+    }
+
+    #[test]
+    fn absolute_paths_outside_the_root_stay_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = canonical_workspace_rel(dir.path(), "/etc/hostname").unwrap_err();
+        assert!(err.contains("outside the workspace root"), "{err}");
+    }
+
+    #[test]
+    fn an_absolute_symlink_name_still_resolves_to_its_real_target() {
+        // Rebasing must not launder: the in-root NAME is rebased, then the
+        // component walk resolves the link and the out-of-root target is
+        // refused exactly as with a relative spelling.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", dir.path().join("docs/link.md")).unwrap();
+        let abs = dir.path().join("docs/link.md");
+        let err = canonical_workspace_rel(dir.path(), abs.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("resolves outside the workspace"), "{err}");
     }
 }

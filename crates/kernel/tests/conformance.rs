@@ -84,7 +84,17 @@ impl Workspace {
         )
     }
 
-    fn edit_payload(path: &str) -> String {
+    /// The platform's real payload shape: file tools address their targets
+    /// with ABSOLUTE paths. The live trial caught the suite driving only
+    /// relative payloads — green while every real edit was refused — so the
+    /// absolute form is now the default here, with one relative-spelling
+    /// case kept to pin that both spellings get one judgment.
+    fn edit_payload(&self, path: &str) -> String {
+        let abs = self.path().join(path);
+        serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": abs}}).to_string()
+    }
+
+    fn edit_payload_rel(path: &str) -> String {
         serde_json::json!({"tool_name": "Edit", "tool_input": {"file_path": path}}).to_string()
     }
 
@@ -147,10 +157,7 @@ fn the_full_trial_matrix_through_the_generated_hooks() {
     let ws = Workspace::new();
 
     // T1 — fail-closed: no active packet, edit blocked, refusal chained.
-    let (code, stderr) = ws.hook(
-        "enforce_file_scope.sh",
-        &Workspace::edit_payload("src/app.py"),
-    );
+    let (code, stderr) = ws.hook("enforce_file_scope.sh", &ws.edit_payload("src/app.py"));
     assert_eq!(code, BLOCK, "unpacketed edit must block: {stderr}");
     assert!(stderr.contains("no active task packet"), "{stderr}");
 
@@ -160,27 +167,39 @@ fn the_full_trial_matrix_through_the_generated_hooks() {
     // T3 — in-scope edit allowed; obligation debt recorded.
     let (code, stderr) = ws.hook(
         "enforce_file_scope.sh",
-        &Workspace::edit_payload("docs/trial-notes.md"),
+        &ws.edit_payload("docs/trial-notes.md"),
     );
     assert_eq!(code, ALLOW, "in-scope edit allows: {stderr}");
     let (code, _) = ws.hook(
         "require_validation.sh",
-        &Workspace::edit_payload("docs/trial-notes.md"),
+        &ws.edit_payload("docs/trial-notes.md"),
     );
     assert_eq!(code, ALLOW, "obligation records without blocking");
 
-    // T4 — out-of-scope edit blocked.
+    // T3b — the relative spelling of the same target gets the same judgment.
     let (code, stderr) = ws.hook(
         "enforce_file_scope.sh",
-        &Workspace::edit_payload("README.md"),
+        &Workspace::edit_payload_rel("docs/trial-notes.md"),
     );
+    assert_eq!(code, ALLOW, "relative spelling, same judgment: {stderr}");
+
+    // T4 — out-of-scope edit blocked.
+    let (code, stderr) = ws.hook("enforce_file_scope.sh", &ws.edit_payload("README.md"));
     assert_eq!(code, BLOCK, "out-of-scope edit blocks");
     assert!(stderr.contains("not in the write scope"), "{stderr}");
+
+    // T4b — an absolute path OUTSIDE the workspace root is refused outright.
+    let (code, stderr) = ws.hook(
+        "enforce_file_scope.sh",
+        &Workspace::edit_payload_rel("/etc/hostname"),
+    );
+    assert_eq!(code, BLOCK, "outside-root absolute blocks");
+    assert!(stderr.contains("outside the workspace root"), "{stderr}");
 
     // T5 — the Guard's own script is protected from its subject.
     let (code, stderr) = ws.hook(
         "enforce_file_scope.sh",
-        &Workspace::edit_payload("harness/hooks/enforce_file_scope.sh"),
+        &ws.edit_payload("harness/hooks/enforce_file_scope.sh"),
     );
     assert_eq!(code, BLOCK, "enforcement artifacts are protected");
     assert!(
@@ -192,7 +211,7 @@ fn the_full_trial_matrix_through_the_generated_hooks() {
     std::os::unix::fs::symlink("/etc/hostname", ws.path().join("docs/trial-link.md")).unwrap();
     let (code, stderr) = ws.hook(
         "enforce_file_scope.sh",
-        &Workspace::edit_payload("docs/trial-link.md"),
+        &ws.edit_payload("docs/trial-link.md"),
     );
     assert_eq!(code, BLOCK, "symlink escape blocks");
     assert!(
@@ -306,7 +325,7 @@ fn amendment_grant_turns_protection_into_a_recorded_amendment() {
 
     let (code, stderr) = ws.hook(
         "enforce_file_scope.sh",
-        &Workspace::edit_payload("harness/enforcement.protected"),
+        &ws.edit_payload("harness/enforcement.protected"),
     );
     assert_eq!(code, ALLOW, "granted amendment allows: {stderr}");
     assert!(

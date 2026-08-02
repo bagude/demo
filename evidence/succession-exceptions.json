@@ -1,0 +1,7 @@
+[
+  {
+    "transition_id": "succession-0001",
+    "manifest_digest": "sha256:74f6d01b7015f9b6d36ac682c1468abf26e572e27b0fcfedcb8883cbb276918a",
+    "exception": "legacy-founding-bootstrap"
+  }
+]

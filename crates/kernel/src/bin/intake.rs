@@ -31,6 +31,18 @@ struct Cli {
     #[arg(long, global = true, default_value = "harness/enforcement.protected")]
     protected: PathBuf,
 
+    /// The governed event ledger, consulted for the succession regime: a
+    /// runtime in candidate mode may not admit work. Missing file → no
+    /// regime. The check runs only when --playbook-ref is also given (the
+    /// runtime identity cannot be computed without it).
+    #[arg(long, global = true, default_value = "evidence/events.jsonl")]
+    events_ledger: PathBuf,
+
+    /// The Playbook digest this invocation runs under, for the candidate-mode
+    /// check on submission.
+    #[arg(long, global = true)]
+    playbook_ref: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -104,6 +116,27 @@ fn run(cli: &Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Submit { file } => {
+            // Task admission is ordinary governance: a candidate runtime may
+            // describe its succession, not take in work. (The check needs the
+            // playbook identity; without --playbook-ref it cannot run — a
+            // stated limitation until the compiled harness bakes it in.)
+            if let Some(playbook) = &cli.playbook_ref {
+                let events = kernel::event::EventLog::at(&cli.events_ledger)
+                    .read_all()
+                    .unwrap_or_default();
+                if let kernel::RuntimeStatus::Candidate { active_runtime } =
+                    kernel::runtime_status(&events, &kernel::runtime_ref(playbook))
+                {
+                    eprintln!(
+                        "refused [{}]: task admission is ordinary governance and this \
+                         runtime is in candidate mode (active runtime {active_runtime}, \
+                         candidate {}).",
+                        kernel::succession::codes::RUNTIME_NOT_ACTIVE,
+                        kernel::runtime_ref(playbook),
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
             let packet = load_packet(file)?;
             match admit_with_protected(&packet, now_rfc3339(), &load_protected(&cli.protected)) {
                 Ok(record) => {

@@ -153,6 +153,24 @@ refusal → activation → attested boundary, plus the silent-handover
 counterfactual the verifier flags — runs in
 `crates/kernel/tests/succession.rs`.
 
+## The first attested succession
+
+This workspace's live ledger carries the protocol's first real use
+([`evidence/succession-0001.json`](../evidence/succession-0001.json), packet
+`77f6efb8e2d4`). The seating of the succession-protocol kernel itself —
+runtime `02a6c163…` → `c70149d8…`, patch `git:ceeb4ae7…` (PR #24),
+maintenance packet `a6b89a7737f0` — was bound through the gate, approved by
+an Ed25519 signature registered to `bagude` in [`approvers.toml`](../approvers.toml),
+preconditioned on the conformance matrix passing live, and activated with
+`disarm_recorded: false` (the window predated the protocol; its start is
+attested only by the successor — the residual-trust case, stated). The
+verifier accepts that boundary as governed.
+
+One earlier boundary (record 17, the first trial-era kernel repair) remains
+**permanently unattested**: its segment closed before the protocol existed,
+and the protocol does not manufacture governance retroactively. The warning
+is the honest scar.
+
 ## Deliberate non-goals
 
 - **Self-hosted bootstrap proof.** The successor is validated by tests the
